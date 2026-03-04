@@ -1,12 +1,25 @@
-const { google } = require("googleapis");
+import { google } from "googleapis";
 
-module.exports = async (req, res) => {
+export default async function handler(req, res) {
   try {
+    // Se você abrir no navegador, isso é GET.
+    // Vamos responder bonitinho, sem crash.
     if (req.method !== "POST") {
-      return res.status(405).json({ error: "Method not allowed" });
+      return res.status(405).json({
+        ok: false,
+        error: "Method not allowed. Use POST /api/log",
+      });
     }
 
-    const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
+    // Body pode vir como objeto ou string
+    let body = req.body;
+    if (typeof body === "string") {
+      try {
+        body = JSON.parse(body);
+      } catch {
+        body = {};
+      }
+    }
 
     const {
       tipo,
@@ -28,7 +41,15 @@ module.exports = async (req, res) => {
     const privateKey = (process.env.GOOGLE_PRIVATE_KEY || "").replace(/\\n/g, "\n");
 
     if (!spreadsheetId || !clientEmail || !privateKey) {
-      return res.status(500).json({ error: "Missing env vars" });
+      return res.status(500).json({
+        ok: false,
+        error: "Missing env vars",
+        missing: {
+          GOOGLE_SHEET_ID: !spreadsheetId,
+          GOOGLE_CLIENT_EMAIL: !clientEmail,
+          GOOGLE_PRIVATE_KEY: !privateKey,
+        },
+      });
     }
 
     const auth = new google.auth.JWT(
@@ -65,7 +86,11 @@ module.exports = async (req, res) => {
 
     return res.status(200).json({ ok: true });
   } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: "Internal error", details: String(err) });
+    console.error("API /api/log error:", err);
+    return res.status(500).json({
+      ok: false,
+      error: "Internal error",
+      details: String(err?.message || err),
+    });
   }
-};
+}
