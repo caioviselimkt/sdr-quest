@@ -2,8 +2,6 @@ import { google } from "googleapis";
 
 export default async function handler(req, res) {
   try {
-    // Se você abrir no navegador, isso é GET.
-    // Vamos responder bonitinho, sem crash.
     if (req.method !== "POST") {
       return res.status(405).json({
         ok: false,
@@ -11,7 +9,6 @@ export default async function handler(req, res) {
       });
     }
 
-    // Body pode vir como objeto ou string
     let body = req.body;
     if (typeof body === "string") {
       try {
@@ -52,14 +49,17 @@ export default async function handler(req, res) {
       });
     }
 
-    const auth = new google.auth.JWT(
-      clientEmail,
-      null,
-      privateKey,
-      ["https://www.googleapis.com/auth/spreadsheets"]
-    );
+    // ✅ FORÇA autenticação correta com Service Account
+    const auth = new google.auth.GoogleAuth({
+      credentials: {
+        client_email: clientEmail,
+        private_key: privateKey,
+      },
+      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+    });
 
-    const sheets = google.sheets({ version: "v4", auth });
+    const authClient = await auth.getClient(); // <- aqui ele pega token automaticamente
+    const sheets = google.sheets({ version: "v4", auth: authClient });
 
     const timestamp = new Date().toISOString();
 
