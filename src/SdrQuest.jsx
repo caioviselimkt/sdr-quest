@@ -382,6 +382,22 @@ export default function SdrQuest() {
   // =====================
   // FUNÇÕES DE AÇÃO
   // =====================
+// ✅ Envia evento para o Google Sheets via Vercel API
+const logEvent = async (payload) => {
+  try {
+    await fetch("/api/log", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      keepalive: true,
+    });
+  } catch (e) {
+    console.warn("Falha ao logar no Sheets:", e);
+  }
+};
+
+// ✅ mês (YYYY-MM) somente para registro no Sheets
+const monthKeyForSheets = new Date().toISOString().slice(0, 7);
   const handleScheduleSubmit = (e) => {
     e.preventDefault();
     if (!meetingForm.date || !meetingForm.opportunity) return;
@@ -400,27 +416,59 @@ export default function SdrQuest() {
     if (player === 'juan' && juanScore > 0) {
       setJuanScore((s) => s - 1);
       setMeetingsList((prev) => {
-        const index = prev.findIndex((m) => m.sdr === 'juan');
-        if (index !== -1) {
-          const newList = [...prev];
-          newList.splice(index, 1);
-          return newList;
-        }
-        return prev;
-      });
+  const index = prev.findIndex((m) => m.sdr === "juan");
+  if (index !== -1) {
+    const removed = prev[index];
+
+    // log no Sheets (deletado)
+    logEvent({
+      tipo: "reuniao",
+      status: "[deletado]",
+      meetingId: String(removed.id),
+      sdr: removed.sdr,
+      ae: removed.ae,
+      oportunidade: removed.opportunity,
+      dataReuniao: removed.date,
+      noShowCount: "",
+      monthKey: monthKeyForSheets,
+      observacao: "clicou -1",
+    });
+
+    const newList = [...prev];
+    newList.splice(index, 1);
+    return newList;
+  }
+  return prev;
+});
     }
 
     if (player === 'heloisa' && heloisaScore > 0) {
       setHeloisaScore((s) => s - 1);
       setMeetingsList((prev) => {
-        const index = prev.findIndex((m) => m.sdr === 'heloisa');
-        if (index !== -1) {
-          const newList = [...prev];
-          newList.splice(index, 1);
-          return newList;
-        }
-        return prev;
-      });
+  const index = prev.findIndex((m) => m.sdr === "heloisa");
+  if (index !== -1) {
+    const removed = prev[index];
+
+    // log no Sheets (deletado)
+    logEvent({
+      tipo: "reuniao",
+      status: "[deletado]",
+      meetingId: String(removed.id),
+      sdr: removed.sdr,
+      ae: removed.ae,
+      oportunidade: removed.opportunity,
+      dataReuniao: removed.date,
+      noShowCount: "",
+      monthKey: monthKeyForSheets,
+      observacao: "clicou -1",
+    });
+
+    const newList = [...prev];
+    newList.splice(index, 1);
+    return newList;
+  }
+  return prev;
+});
     }
   };
 
@@ -435,6 +483,21 @@ export default function SdrQuest() {
     if (existingLeadIndex >= 0) {
       const updatedLeads = [...leads];
       updatedLeads[existingLeadIndex].noShows += 1;
+const newCount = updatedLeads[existingLeadIndex].noShows;
+
+// log no Sheets (no-show)
+logEvent({
+  tipo: "no-show",
+  status: "[no-show]",
+  meetingId: "",
+  sdr: updatedLeads[existingLeadIndex].sdr,
+  ae: "",
+  oportunidade: updatedLeads[existingLeadIndex].name,
+  dataReuniao: "",
+  noShowCount: newCount,
+  monthKey: monthKeyForSheets,
+  observacao: "no-show registrado",
+});
 
       // 3º no-show: penaliza e remove agendamento
       if (updatedLeads[existingLeadIndex].noShows === 3) {
