@@ -488,15 +488,15 @@ const newCount = updatedLeads[existingLeadIndex].noShows;
 // log no Sheets (no-show)
 logEvent({
   tipo: "no-show",
-  status: "[no-show]",
+  status: "",                 // ✅ deixa vazio (NoShowCount já representa o no-show)
   meetingId: "",
   sdr: updatedLeads[existingLeadIndex].sdr,
   ae: "",
   oportunidade: updatedLeads[existingLeadIndex].name,
   dataReuniao: "",
-  noShowCount: newCount,
+  noShowCount: newCount,      // ✅ 1, 2 ou 3
   monthKey: monthKeyForSheets,
-  observacao: "no-show registrado",
+  observacao: `no-show ${newCount}`, // ✅ mostra 1/2/3 na observação
 });
 
       // 3º no-show: penaliza e remove agendamento
@@ -530,7 +530,29 @@ logEvent({
     setNewLeadName('');
   };
 
-  const removeLead = (id) => setLeads(leads.filter((l) => l.id !== id));
+  const removeLead = (id) => {
+  setLeads((prev) => {
+    const lead = prev.find((l) => l.id === id);
+
+    // ✅ log no Sheets: marcar como deletado (mesma regra do -1)
+    if (lead) {
+      logEvent({
+        tipo: "no-show",
+        status: "[deletado]",
+        meetingId: "",
+        sdr: lead.sdr,
+        ae: "",
+        oportunidade: lead.name,
+        dataReuniao: "",
+        noShowCount: lead.noShows,
+        monthKey: monthKeyForSheets,
+        observacao: "removido do Radar de No-Shows",
+      });
+    }
+
+    return prev.filter((l) => l.id !== id);
+  });
+};
 
   const resetCurrentMonth = () => {
     setJuanScore(0);
