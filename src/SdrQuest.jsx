@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   Target,
@@ -223,45 +222,6 @@ export default function SdrQuest() {
       }
     }, 60 * 1000); // checa a cada 1 minuto
 
-// =====================
-// SYNC AO VIVO (Sheets -> App)
-// =====================
-useEffect(() => {
-  let alive = true;
-
-  const pull = async () => {
-    try {
-      const resp = await fetch(`/api/state?month=${encodeURIComponent(monthKeyState)}`, {
-        method: "GET",
-        cache: "no-store",
-      });
-      const data = await resp.json();
-      if (!alive) return;
-
-      if (!resp.ok || !data?.ok) {
-        console.warn("Falha no sync:", data);
-        return;
-      }
-
-      // atualiza estado com o que está no Sheets (fonte da verdade)
-      setJuanScore(data.juanScore ?? 0);
-      setHeloisaScore(data.heloisaScore ?? 0);
-      setMeetingsList(Array.isArray(data.meetingsList) ? data.meetingsList : []);
-      setLeads(Array.isArray(data.leads) ? data.leads : []);
-    } catch (e) {
-      console.warn("Erro no sync:", e);
-    }
-  };
-
-  pull(); // roda 1x ao abrir
-  const id = setInterval(pull, 3000); // a cada 3s
-
-  return () => {
-    alive = false;
-    clearInterval(id);
-  };
-}, [monthKeyState]);
-
     return () => clearInterval(interval);
   }, [monthKeyState]);
 
@@ -437,215 +397,138 @@ const logEvent = async (payload) => {
 };
 
 // ✅ mês (YYYY-MM) somente para registro no Sheets
-const monthKeyForSheets = monthKeyState;
-const normalizeCompany = (s = "") => String(s).trim().replace(/\s+/g, " ");
-const makeMeetingId = (opportunity) =>
-  `${monthKeyForSheets}:${normalizeCompany(opportunity).toLowerCase()}`;
+const monthKeyForSheets = new Date().toISOString().slice(0, 7);
   const handleScheduleSubmit = (e) => {
-  e.preventDefault();
-  if (!meetingForm.date || !meetingForm.opportunity) return;
+    e.preventDefault();
+    if (!meetingForm.date || !meetingForm.opportunity) return;
 
-  const opp = normalizeCompany(meetingForm.opportunity);
+    // adiciona no topo (evita bug de state)
+    setMeetingsList((prev) => [{ ...meetingForm, sdr: schedulingPlayer, id: Date.now() }, ...prev]);
 
-  const created = {
-    ...meetingForm,
-    opportunity: opp,
-    sdr: schedulingPlayer,
-    id: Date.now(),
+    if (schedulingPlayer === 'juan') setJuanScore((s) => s + 1);
+    if (schedulingPlayer === 'heloisa') setHeloisaScore((s) => s + 1);
+
+    setSchedulingPlayer(null);
+    setMeetingForm({ date: '', opportunity: '', ae: 'Jânio' });
   };
 
-  // adiciona no topo
-  setMeetingsList((prev) => [created, ...prev]);
-
-  // pontua
-  if (schedulingPlayer === "juan") setJuanScore((s) => s + 1);
-  if (schedulingPlayer === "heloisa") setHeloisaScore((s) => s + 1);
-
-  // ✅ REGISTRA NO SHEETS (cria/atualiza a linha da empresa no mês)
-  logEvent({
-    tipo: "reuniao",
-    status: "",
-    meetingId: makeMeetingId(created.opportunity),
-    sdr: created.sdr,
-    ae: created.ae,
-    oportunidade: created.opportunity,
-    dataReuniao: created.date,
-    noShowCount: "",
-    monthKey: monthKeyForSheets,
-    observacao: "agendado",
-  });
-
-  // reseta form
-  setSchedulingPlayer(null);
-  setMeetingForm({ date: "", opportunity: "", ae: "Jânio" });
-};
-
   const removeMeeting = (player) => {
-  if (player === "juan" && juanScore > 0) {
-    setJuanScore((s) => s - 1);
-
-    setMeetingsList((prev) => {
-      const index = prev.findIndex((m) => m.sdr === "juan");
-      if (index !== -1) {
-        const removed = prev[index];
-
-        // ✅ Sheets (deletado): usa chave estável (mês + oportunidade)
-        logEvent({
-          tipo: "reuniao",
-          status: "[deletado]",
-          meetingId: makeMeetingId(removed.opportunity),
-          sdr: removed.sdr,
-          ae: removed.ae,
-          oportunidade: removed.opportunity,
-          dataReuniao: removed.date,
-          noShowCount: "",
-          monthKey: monthKeyForSheets,
-          observacao: "clicou -1",
-        });
-
-        const newList = [...prev];
-        newList.splice(index, 1);
-        return newList;
-      }
-      return prev;
-    });
-  }
-
-  if (player === "heloisa" && heloisaScore > 0) {
-    setHeloisaScore((s) => s - 1);
-
-    setMeetingsList((prev) => {
-      const index = prev.findIndex((m) => m.sdr === "heloisa");
-      if (index !== -1) {
-        const removed = prev[index];
-
-        // ✅ Sheets (deletado): usa chave estável (mês + oportunidade)
-        logEvent({
-          tipo: "reuniao",
-          status: "[deletado]",
-          meetingId: makeMeetingId(removed.opportunity),
-          sdr: removed.sdr,
-          ae: removed.ae,
-          oportunidade: removed.opportunity,
-          dataReuniao: removed.date,
-          noShowCount: "",
-          monthKey: monthKeyForSheets,
-          observacao: "clicou -1",
-        });
-
-        const newList = [...prev];
-        newList.splice(index, 1);
-        return newList;
-      }
-      return prev;
-    });
-  }
-};
-
-const deleteMeetingById = (id) => {
-  setMeetingsList((prev) => {
-    const index = prev.findIndex((m) => m.id === id);
-    if (index === -1) return prev;
-
+    if (player === 'juan' && juanScore > 0) {
+      setJuanScore((s) => s - 1);
+      setMeetingsList((prev) => {
+  const index = prev.findIndex((m) => m.sdr === "juan");
+  if (index !== -1) {
     const removed = prev[index];
 
-    // Ajusta placar
-    if (removed.sdr === "juan") setJuanScore((s) => Math.max(0, s - 1));
-    if (removed.sdr === "heloisa") setHeloisaScore((s) => Math.max(0, s - 1));
-
-    // ✅ Sheets (deletado): usa chave estável (mês + oportunidade)
+    // log no Sheets (deletado)
     logEvent({
       tipo: "reuniao",
       status: "[deletado]",
-      meetingId: makeMeetingId(removed.opportunity),
+      meetingId: String(removed.id),
       sdr: removed.sdr,
       ae: removed.ae,
       oportunidade: removed.opportunity,
       dataReuniao: removed.date,
       noShowCount: "",
       monthKey: monthKeyForSheets,
-      observacao: "clicou X (feed)",
+      observacao: "clicou -1",
     });
 
     const newList = [...prev];
     newList.splice(index, 1);
     return newList;
-  });
-};
-
-  const handleAddNoShow = (e) => {
-  e.preventDefault();
-  if (!newLeadName.trim()) return;
-
-  const existingLeadIndex = leads.findIndex(
-    (l) => l.name.toLowerCase() === newLeadName.toLowerCase() && l.sdr === newLeadSdr
-  );
-
-  if (existingLeadIndex >= 0) {
-    const updatedLeads = [...leads];
-    updatedLeads[existingLeadIndex].noShows += 1;
-    const newCount = updatedLeads[existingLeadIndex].noShows;
-
-    // ✅ Sheets (no-show): usa chave estável (mês + empresa)
-    logEvent({
-      tipo: "no-show",
-      status: "",
-      meetingId: makeMeetingId(updatedLeads[existingLeadIndex].name),
-      sdr: updatedLeads[existingLeadIndex].sdr,
-      ae: "",
-      oportunidade: updatedLeads[existingLeadIndex].name,
-      dataReuniao: "",
-      noShowCount: newCount,
-      monthKey: monthKeyForSheets,
-      observacao: `no-show ${newCount}`,
-    });
-
-    // 3º no-show: penaliza e remove agendamento
-    if (newCount === 3) {
-      const penalizedSdr = updatedLeads[existingLeadIndex].sdr;
-      const leadName = updatedLeads[existingLeadIndex].name;
-
-      if (penalizedSdr === "juan") setJuanScore((s) => Math.max(0, s - 1));
-      else setHeloisaScore((s) => Math.max(0, s - 1));
-
-      setMeetingsList((prev) => {
-        let index = prev.findIndex(
-          (m) => m.sdr === penalizedSdr && (m.opportunity || "").toLowerCase() === leadName.toLowerCase()
-        );
-        if (index === -1) index = prev.findIndex((m) => m.sdr === penalizedSdr);
-
-        if (index !== -1) {
-          const newList = [...prev];
-          newList.splice(index, 1);
-          return newList;
-        }
-        return prev;
-      });
+  }
+  return prev;
+});
     }
 
-    setLeads(updatedLeads);
-  } else {
-    const newEntry = { id: Date.now(), name: newLeadName, sdr: newLeadSdr, noShows: 1 };
+    if (player === 'heloisa' && heloisaScore > 0) {
+      setHeloisaScore((s) => s - 1);
+      setMeetingsList((prev) => {
+  const index = prev.findIndex((m) => m.sdr === "heloisa");
+  if (index !== -1) {
+    const removed = prev[index];
 
-    // ✅ Sheets (no-show 1): estava faltando no seu código
+    // log no Sheets (deletado)
     logEvent({
-      tipo: "no-show",
-      status: "",
-      meetingId: makeMeetingId(newEntry.name),
-      sdr: newEntry.sdr,
-      ae: "",
-      oportunidade: newEntry.name,
-      dataReuniao: "",
-      noShowCount: 1,
+      tipo: "reuniao",
+      status: "[deletado]",
+      meetingId: String(removed.id),
+      sdr: removed.sdr,
+      ae: removed.ae,
+      oportunidade: removed.opportunity,
+      dataReuniao: removed.date,
+      noShowCount: "",
       monthKey: monthKeyForSheets,
-      observacao: "no-show 1",
+      observacao: "clicou -1",
     });
 
-    setLeads([newEntry, ...leads]);
+    const newList = [...prev];
+    newList.splice(index, 1);
+    return newList;
   }
+  return prev;
+});
+    }
+  };
 
-  setNewLeadName("");
-};
+  const handleAddNoShow = (e) => {
+    e.preventDefault();
+    if (!newLeadName.trim()) return;
+
+    const existingLeadIndex = leads.findIndex(
+      (l) => l.name.toLowerCase() === newLeadName.toLowerCase() && l.sdr === newLeadSdr
+    );
+
+    if (existingLeadIndex >= 0) {
+      const updatedLeads = [...leads];
+      updatedLeads[existingLeadIndex].noShows += 1;
+const newCount = updatedLeads[existingLeadIndex].noShows;
+
+// log no Sheets (no-show)
+logEvent({
+  tipo: "no-show",
+  status: "",                 // ✅ deixa vazio (NoShowCount já representa o no-show)
+  meetingId: "",
+  sdr: updatedLeads[existingLeadIndex].sdr,
+  ae: "",
+  oportunidade: updatedLeads[existingLeadIndex].name,
+  dataReuniao: "",
+  noShowCount: newCount,      // ✅ 1, 2 ou 3
+  monthKey: monthKeyForSheets,
+  observacao: `no-show ${newCount}`, // ✅ mostra 1/2/3 na observação
+});
+
+      // 3º no-show: penaliza e remove agendamento
+      if (updatedLeads[existingLeadIndex].noShows === 3) {
+        const penalizedSdr = updatedLeads[existingLeadIndex].sdr;
+        const leadName = updatedLeads[existingLeadIndex].name;
+
+        if (penalizedSdr === 'juan') setJuanScore((s) => Math.max(0, s - 1));
+        else setHeloisaScore((s) => Math.max(0, s - 1));
+
+        setMeetingsList((prev) => {
+          let index = prev.findIndex(
+            (m) => m.sdr === penalizedSdr && (m.opportunity || '').toLowerCase() === leadName.toLowerCase()
+          );
+          if (index === -1) index = prev.findIndex((m) => m.sdr === penalizedSdr);
+
+          if (index !== -1) {
+            const newList = [...prev];
+            newList.splice(index, 1);
+            return newList;
+          }
+          return prev;
+        });
+      }
+
+      setLeads(updatedLeads);
+    } else {
+      setLeads([{ id: Date.now(), name: newLeadName, sdr: newLeadSdr, noShows: 1 }, ...leads]);
+    }
+
+    setNewLeadName('');
+  };
 
   const removeLead = (id) => setLeads(leads.filter((l) => l.id !== id));
 
@@ -830,30 +713,14 @@ const deleteMeetingById = (id) => {
               ) : (
                 meetingsList.map((meeting) => (
                   <div key={meeting.id} className="min-w-[250px] bg-slate-800/50 border border-slate-700 rounded-xl p-4 flex flex-col gap-2">
-                    <div className="flex justify-between items-start gap-2">
-  <span className="font-bold text-white truncate flex-1" title={meeting.opportunity}>
-    {meeting.opportunity}
-  </span>
-
-  <div className="flex items-center gap-2">
-    <span
-      className={`text-xs font-bold px-2 py-1 rounded bg-slate-900 ${
-        meeting.sdr === "juan" ? "text-cyan-400" : "text-purple-400"
-      }`}
-    >
-      {meeting.sdr === "juan" ? "Juan" : "Heloísa"}
-    </span>
-
-    <button
-      type="button"
-      onClick={() => deleteMeetingById(meeting.id)}
-      className="text-slate-500 hover:text-white transition-colors bg-slate-900/40 border border-slate-700/70 px-2 py-1 rounded"
-      title="Remover este agendamento"
-    >
-      <X className="w-4 h-4" />
-    </button>
-  </div>
-</div>
+                    <div className="flex justify-between items-start">
+                      <span className="font-bold text-white truncate" title={meeting.opportunity}>
+                        {meeting.opportunity}
+                      </span>
+                      <span className={`text-xs font-bold px-2 py-1 rounded bg-slate-900 ${meeting.sdr === 'juan' ? 'text-cyan-400' : 'text-purple-400'}`}>
+                        {meeting.sdr === 'juan' ? 'Juan' : 'Heloísa'}
+                      </span>
+                    </div>
                     <div className="flex items-center gap-2 text-xs text-slate-400">
                       <Calendar className="w-3 h-3" /> {meeting.date}
                     </div>
