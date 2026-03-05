@@ -534,7 +534,7 @@ const deleteMeetingById = (id) => {
   });
 };
 
-  cconst handleAddNoShow = (e) => {
+  const handleAddNoShow = (e) => {
   e.preventDefault();
   if (!newLeadName.trim()) return;
 
