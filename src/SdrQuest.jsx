@@ -223,6 +223,45 @@ export default function SdrQuest() {
       }
     }, 60 * 1000); // checa a cada 1 minuto
 
+// =====================
+// SYNC AO VIVO (Sheets -> App)
+// =====================
+useEffect(() => {
+  let alive = true;
+
+  const pull = async () => {
+    try {
+      const resp = await fetch(`/api/state?month=${encodeURIComponent(monthKeyState)}`, {
+        method: "GET",
+        cache: "no-store",
+      });
+      const data = await resp.json();
+      if (!alive) return;
+
+      if (!resp.ok || !data?.ok) {
+        console.warn("Falha no sync:", data);
+        return;
+      }
+
+      // atualiza estado com o que está no Sheets (fonte da verdade)
+      setJuanScore(data.juanScore ?? 0);
+      setHeloisaScore(data.heloisaScore ?? 0);
+      setMeetingsList(Array.isArray(data.meetingsList) ? data.meetingsList : []);
+      setLeads(Array.isArray(data.leads) ? data.leads : []);
+    } catch (e) {
+      console.warn("Erro no sync:", e);
+    }
+  };
+
+  pull(); // roda 1x ao abrir
+  const id = setInterval(pull, 3000); // a cada 3s
+
+  return () => {
+    alive = false;
+    clearInterval(id);
+  };
+}, [monthKeyState]);
+
     return () => clearInterval(interval);
   }, [monthKeyState]);
 
