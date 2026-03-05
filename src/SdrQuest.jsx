@@ -399,18 +399,34 @@ const logEvent = async (payload) => {
 // ✅ mês (YYYY-MM) somente para registro no Sheets
 const monthKeyForSheets = new Date().toISOString().slice(0, 7);
   const handleScheduleSubmit = (e) => {
-    e.preventDefault();
-    if (!meetingForm.date || !meetingForm.opportunity) return;
+  e.preventDefault();
+  if (!meetingForm.date || !meetingForm.opportunity) return;
 
-    // adiciona no topo (evita bug de state)
-    setMeetingsList((prev) => [{ ...meetingForm, sdr: schedulingPlayer, id: Date.now() }, ...prev]);
+  const newMeeting = { ...meetingForm, sdr: schedulingPlayer, id: Date.now() };
 
-    if (schedulingPlayer === 'juan') setJuanScore((s) => s + 1);
-    if (schedulingPlayer === 'heloisa') setHeloisaScore((s) => s + 1);
+  // ✅ log no Sheets (criado/atualiza a linha da empresa no mês)
+  logEvent({
+    tipo: "reuniao",
+    status: "",
+    meetingId: String(newMeeting.id),
+    sdr: newMeeting.sdr,
+    ae: newMeeting.ae,
+    oportunidade: newMeeting.opportunity,
+    dataReuniao: newMeeting.date,
+    noShowCount: "",
+    monthKey: monthKeyForSheets,
+    observacao: "criado",
+  });
 
-    setSchedulingPlayer(null);
-    setMeetingForm({ date: '', opportunity: '', ae: 'Jânio' });
-  };
+  // adiciona no topo
+  setMeetingsList((prev) => [newMeeting, ...prev]);
+
+  if (schedulingPlayer === "juan") setJuanScore((s) => s + 1);
+  if (schedulingPlayer === "heloisa") setHeloisaScore((s) => s + 1);
+
+  setSchedulingPlayer(null);
+  setMeetingForm({ date: "", opportunity: "", ae: "Jânio" });
+};
 
   const removeMeeting = (player) => {
     if (player === 'juan' && juanScore > 0) {
@@ -433,6 +449,37 @@ const monthKeyForSheets = new Date().toISOString().slice(0, 7);
       monthKey: monthKeyForSheets,
       observacao: "clicou -1",
     });
+
+const deleteMeetingById = (id) => {
+  setMeetingsList((prev) => {
+    const index = prev.findIndex((m) => m.id === id);
+    if (index === -1) return prev;
+
+    const removed = prev[index];
+
+    // ajusta placar
+    if (removed.sdr === "juan") setJuanScore((s) => Math.max(0, s - 1));
+    if (removed.sdr === "heloisa") setHeloisaScore((s) => Math.max(0, s - 1));
+
+    // ✅ log no Sheets (deletado) — mesma regra do -1
+    logEvent({
+      tipo: "reuniao",
+      status: "[deletado]",
+      meetingId: String(removed.id),
+      sdr: removed.sdr,
+      ae: removed.ae,
+      oportunidade: removed.opportunity,
+      dataReuniao: removed.date,
+      noShowCount: "",
+      monthKey: monthKeyForSheets,
+      observacao: "removido no feed (X)",
+    });
+
+    const newList = [...prev];
+    newList.splice(index, 1);
+    return newList;
+  });
+};
 
     const newList = [...prev];
     newList.splice(index, 1);
@@ -735,11 +782,30 @@ logEvent({
               ) : (
                 meetingsList.map((meeting) => (
                   <div key={meeting.id} className="min-w-[250px] bg-slate-800/50 border border-slate-700 rounded-xl p-4 flex flex-col gap-2">
-                    <div className="flex justify-between items-start">
-                      <span className="font-bold text-white truncate" title={meeting.opportunity}>
-                        {meeting.opportunity}
-                      </span>
-                      <span className={`text-xs font-bold px-2 py-1 rounded bg-slate-900 ${meeting.sdr === 'juan' ? 'text-cyan-400' : 'text-purple-400'}`}>
+                    <div className="flex justify-between items-start gap-2">
+  <span className="font-bold text-white truncate flex-1" title={meeting.opportunity}>
+    {meeting.opportunity}
+  </span>
+
+  <div className="flex items-center gap-2">
+    <span
+      className={`text-xs font-bold px-2 py-1 rounded bg-slate-900 ${
+        meeting.sdr === "juan" ? "text-cyan-400" : "text-purple-400"
+      }`}
+    >
+      {meeting.sdr === "juan" ? "Juan" : "Heloísa"}
+    </span>
+
+    <button
+      type="button"
+      onClick={() => deleteMeetingById(meeting.id)}
+      className="text-slate-400 hover:text-white bg-slate-900/60 hover:bg-slate-900 px-2 py-1 rounded"
+      title="Remover este agendamento"
+    >
+      ×
+    </button>
+  </div>
+</div>
                         {meeting.sdr === 'juan' ? 'Juan' : 'Heloísa'}
                       </span>
                     </div>
