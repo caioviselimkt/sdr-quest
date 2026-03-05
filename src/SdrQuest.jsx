@@ -402,8 +402,24 @@ const monthKeyForSheets = new Date().toISOString().slice(0, 7);
     e.preventDefault();
     if (!meetingForm.date || !meetingForm.opportunity) return;
 
+    const newMeeting = { ...meetingForm, sdr: schedulingPlayer, id: Date.now() };
+
     // adiciona no topo (evita bug de state)
-    setMeetingsList((prev) => [{ ...meetingForm, sdr: schedulingPlayer, id: Date.now() }, ...prev]);
+    setMeetingsList((prev) => [newMeeting, ...prev]);
+
+    // log no Sheets (agendado)
+    logEvent({
+      tipo: "reuniao",
+      status: "",
+      meetingId: String(newMeeting.id),
+      sdr: newMeeting.sdr,
+      ae: newMeeting.ae,
+      oportunidade: newMeeting.opportunity,
+      dataReuniao: newMeeting.date,
+      noShowCount: "",
+      monthKey: monthKeyForSheets,
+      observacao: "agendado",
+    });
 
     if (schedulingPlayer === 'juan') setJuanScore((s) => s + 1);
     if (schedulingPlayer === 'heloisa') setHeloisaScore((s) => s + 1);
@@ -471,6 +487,39 @@ const monthKeyForSheets = new Date().toISOString().slice(0, 7);
 });
     }
   };
+
+  // Remove um agendamento específico pelo ID (botão X do card)
+  const removeMeetingById = (meetingId, reason = "clicou X") => {
+    setMeetingsList((prev) => {
+      const index = prev.findIndex((m) => String(m.id) === String(meetingId));
+      if (index === -1) return prev;
+
+      const removed = prev[index];
+
+      // ajusta placar do SDR correto
+      if (removed.sdr === "juan") setJuanScore((s) => Math.max(0, s - 1));
+      if (removed.sdr === "heloisa") setHeloisaScore((s) => Math.max(0, s - 1));
+
+      // log no Sheets (deletado)
+      logEvent({
+        tipo: "reuniao",
+        status: "[deletado]",
+        meetingId: String(removed.id),
+        sdr: removed.sdr,
+        ae: removed.ae,
+        oportunidade: removed.opportunity,
+        dataReuniao: removed.date,
+        noShowCount: "",
+        monthKey: monthKeyForSheets,
+        observacao: reason,
+      });
+
+      const newList = [...prev];
+      newList.splice(index, 1);
+      return newList;
+    });
+  };
+
 
   const handleAddNoShow = (e) => {
     e.preventDefault();
@@ -717,9 +766,21 @@ logEvent({
                       <span className="font-bold text-white truncate" title={meeting.opportunity}>
                         {meeting.opportunity}
                       </span>
-                      <span className={`text-xs font-bold px-2 py-1 rounded bg-slate-900 ${meeting.sdr === 'juan' ? 'text-cyan-400' : 'text-purple-400'}`}>
-                        {meeting.sdr === 'juan' ? 'Juan' : 'Heloísa'}
-                      </span>
+
+                      <div className="flex items-center gap-2">
+                        <span className={`text-xs font-bold px-2 py-1 rounded bg-slate-900 ${meeting.sdr === 'juan' ? 'text-cyan-400' : 'text-purple-400'}`}>
+                          {meeting.sdr === 'juan' ? 'Juan' : 'Heloísa'}
+                        </span>
+
+                        <button
+                          type="button"
+                          onClick={() => removeMeetingById(meeting.id, "clicou X")}
+                          className="text-slate-500 hover:text-red-400 transition-colors"
+                          title="Remover agendamento"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
                     </div>
                     <div className="flex items-center gap-2 text-xs text-slate-400">
                       <Calendar className="w-3 h-3" /> {meeting.date}
