@@ -1,10 +1,9 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   Target,
   Zap,
   AlertTriangle,
   CheckCircle,
-  ChevronRight,
   UserPlus,
   Flame,
   RefreshCw,
@@ -14,217 +13,341 @@ import {
   X,
   ChevronDown,
   ChevronUp,
-} from "lucide-react";
+} from 'lucide-react';
 
-// --- CONFIGURAÇÕES DE METAS ---
+// =====================
+// CONFIGURAÇÕES DE METAS
+// =====================
 const MILESTONES = [
-  { percent: 60, target: 42, label: "Meta Mínima" }, // 21 cada
-  { percent: 70, target: 50, label: "Acelerando" }, // 25 cada
-  { percent: 80, target: 58, label: "Voo Cruzeiro" }, // 28 cada
-  { percent: 90, target: 68, label: "Elite" }, // 32 cada
-  { percent: 100, target: 76, label: "Supernova" }, // 35 cada
+  { percent: 60, target: 42, label: 'Meta Mínima' },   // 21 cada
+  { percent: 70, target: 50, label: 'Acelerando' },    // 25 cada
+  { percent: 80, target: 58, label: 'Voo Cruzeiro' },  // 29 cada
+  { percent: 90, target: 68, label: 'Elite' },         // 34 cada
+  { percent: 100, target: 76, label: 'Supernova' },    // 38 cada
 ];
 
-// --- DICAS SPICED ---
+// Metas individuais (metade das metas da equipe)
+const INDIVIDUAL_MILESTONES = MILESTONES.map((m) => ({
+  ...m,
+  target: Math.round(m.target / 2),
+}));
+
+// =====================
+// DICAS SPICED
+// =====================
 const SPICED_TIPS = [
-  { letter: "S", title: "Situação", text: "Qual o contexto atual da empresa? Fatos, números e cenário." },
-  { letter: "P", title: "Problema (Pain)", text: "Qual a dor principal que os impede de crescer ou gera custo?" },
-  { letter: "I", title: "Impacto", text: "Como esse problema afeta a receita, tempo ou moral da equipe?" },
-  { letter: "C", title: "Evento Crítico", text: "Por que eles precisam resolver isso AGORA? Qual o prazo?" },
-  { letter: "D", title: "Decisão", text: "Quem assina o cheque? Como é o processo de compra deles?" },
+  { letter: 'S', title: 'Situação', text: 'Qual o contexto atual da empresa? Fatos, números e cenário.' },
+  { letter: 'P', title: 'Problema (Pain)', text: 'Qual a dor principal que os impede de crescer ou gera custo?' },
+  { letter: 'I', title: 'Impacto', text: 'Como esse problema afeta a receita, tempo ou moral da equipe?' },
+  { letter: 'C', title: 'Evento Crítico', text: 'Por que eles precisam resolver isso AGORA? Qual o prazo?' },
+  { letter: 'D', title: 'Decisão', text: 'Quem assina o cheque? Como é o processo de compra deles?' },
 ];
 
 // =====================
-// PERSISTÊNCIA (por mês)
+// STORAGE (POR MÊS) + ÍNDICE
 // =====================
-const STORAGE_KEY = "sdrquest:v1";
+const STORAGE_PREFIX = 'sdrquest:month:';     // ex: sdrquest:month:2026-03
+const STORAGE_INDEX_KEY = 'sdrquest:months:index'; // lista de months disponíveis
 
-function monthKeyNow() {
-  return new Date().toISOString().slice(0, 7); // YYYY-MM
+function getMonthKey(date = new Date()) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  return `${y}-${m}`;
 }
 
-function safeJsonParse(raw) {
+function parseMonthKey(monthKey) {
+  const [y, m] = monthKey.split('-').map((x) => Number(x));
+  return { y, m };
+}
+
+function prevMonthKey(monthKey) {
+  const { y, m } = parseMonthKey(monthKey);
+  const d = new Date(y, m - 1, 1);
+  d.setMonth(d.getMonth() - 1);
+  return getMonthKey(d);
+}
+
+function monthLabelPt(monthKey) {
+  const { y, m } = parseMonthKey(monthKey);
+  const d = new Date(y, m - 1, 1);
   try {
-    return JSON.parse(raw);
+    return new Intl.DateTimeFormat('pt-BR', { month: 'long', year: 'numeric' }).format(d);
   } catch {
+    return monthKey;
+  }
+}
+
+function defaultMonthState() {
+  return {
+    juanScore: 0,
+    heloisaScore: 0,
+    meetingsList: [],
+    leads: [],
+  };
+}
+
+function loadMonthState(monthKey) {
+  try {
+    const raw = localStorage.getItem(`${STORAGE_PREFIX}${monthKey}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    console.warn('Could not load month state:', e);
     return null;
   }
 }
 
-function normalizeText(s) {
-  return (s || "").toString().trim().replace(/\s+/g, " ");
-}
-
-function loadStateAll() {
-  const raw = localStorage.getItem(STORAGE_KEY);
-  if (!raw) {
-    return {
-      currentMonth: monthKeyNow(),
-      months: {},
-    };
-  }
-
-  const parsed = safeJsonParse(raw);
-  // Migração: se era o estado antigo (juanScore, etc), transforma em months
-  if (parsed && typeof parsed === "object" && !parsed.months) {
-    const mk = monthKeyNow();
-    return {
-      currentMonth: mk,
-      months: {
-        [mk]: {
-          juanScore: parsed.juanScore ?? 0,
-          heloisaScore: parsed.heloisaScore ?? 0,
-          meetingsList: parsed.meetingsList ?? [],
-          leads: parsed.leads ?? [],
-          celebrated: parsed.celebrated ?? { team: [], juan: [], heloisa: [] },
-        },
-      },
-    };
-  }
-
-  if (parsed && typeof parsed === "object") {
-    return {
-      currentMonth: parsed.currentMonth || monthKeyNow(),
-      months: parsed.months || {},
-    };
-  }
-
-  return {
-    currentMonth: monthKeyNow(),
-    months: {},
-  };
-}
-
-function saveStateAll(state) {
+function saveMonthState(monthKey, state) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    localStorage.setItem(`${STORAGE_PREFIX}${monthKey}`, JSON.stringify(state));
   } catch (e) {
-    console.warn("Could not save state:", e);
+    console.warn('Could not save month state:', e);
   }
 }
 
-export default function SdrQuest() {
-  // mês atual
-  const currentMonthKey = monthKeyNow();
-
-  // carrega tudo
-  const savedAllRef = useRef(loadStateAll());
-
-  // garante que o mês atual existe
-  if (!savedAllRef.current.months[currentMonthKey]) {
-    savedAllRef.current.months[currentMonthKey] = {
-      juanScore: 0,
-      heloisaScore: 0,
-      meetingsList: [],
-      leads: [],
-      celebrated: { team: [], juan: [], heloisa: [] },
-    };
+function getMonthsIndex() {
+  try {
+    const raw = localStorage.getItem(STORAGE_INDEX_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
   }
+}
 
-  // dados do mês atual
-  const initialMonthData = savedAllRef.current.months[currentMonthKey];
+function setMonthsIndex(list) {
+  try {
+    localStorage.setItem(STORAGE_INDEX_KEY, JSON.stringify(list));
+  } catch (e) {
+    console.warn('Could not save months index:', e);
+  }
+}
 
-  // Estados dos Jogadores
-  const [juanScore, setJuanScore] = useState(initialMonthData.juanScore ?? 0);
-  const [heloisaScore, setHeloisaScore] = useState(initialMonthData.heloisaScore ?? 0);
+function ensureMonthInIndex(monthKey) {
+  const idx = getMonthsIndex();
+  if (!idx.includes(monthKey)) {
+    const next = [monthKey, ...idx].filter((v, i, a) => a.indexOf(v) === i);
+    next.sort((a, b) => (a > b ? -1 : a < b ? 1 : 0)); // desc
+    setMonthsIndex(next);
+    return next;
+  }
+  return idx;
+}
 
-  // Estado de Agendamentos
+function chooseDefaultHistoryMonth(currentKey, index) {
+  const prev = prevMonthKey(currentKey);
+  if (index.includes(prev)) return prev;
+  const other = index.find((k) => k !== currentKey);
+  return other || prev;
+}
+
+// =====================
+// COMPONENTE PRINCIPAL
+// =====================
+export default function SdrQuest() {
+  // mês atual do placar
+  const [monthKeyState, setMonthKeyState] = useState(() => getMonthKey());
+
+  // carrega dados do mês atual apenas na montagem
+  const initialSaved = useMemo(() => {
+    const mk = getMonthKey();
+    const saved = loadMonthState(mk);
+    return saved ?? defaultMonthState();
+  }, []);
+
+  // índice de meses salvos
+  const [monthsIndex, setMonthsIndexState] = useState(() => {
+    const idx = getMonthsIndex();
+    const current = getMonthKey();
+    const hasCurrent = !!loadMonthState(current);
+    if (hasCurrent && !idx.includes(current)) return ensureMonthInIndex(current);
+    return idx;
+  });
+
+  // =====================
+  // ESTADOS (MÊS ATUAL)
+  // =====================
+  const [juanScore, setJuanScore] = useState(initialSaved.juanScore ?? 0);
+  const [heloisaScore, setHeloisaScore] = useState(initialSaved.heloisaScore ?? 0);
+
   const [schedulingPlayer, setSchedulingPlayer] = useState(null);
-  const [meetingForm, setMeetingForm] = useState({ date: "", opportunity: "", ae: "Jânio" });
-  const [meetingsList, setMeetingsList] = useState(initialMonthData.meetingsList ?? []);
+  const [meetingForm, setMeetingForm] = useState({ date: '', opportunity: '', ae: 'Jânio' });
+  const [meetingsList, setMeetingsList] = useState(Array.isArray(initialSaved.meetingsList) ? initialSaved.meetingsList : []);
   const [isMeetingsFeedOpen, setIsMeetingsFeedOpen] = useState(true);
 
-  // Estados do Jogo
-  const [celebrating, setCelebrating] = useState(false);
-  const [celebrationTitle, setCelebrationTitle] = useState("META ATINGIDA!");
-  const [celebrationSubtitle, setCelebrationSubtitle] = useState("Excelente trabalho equipe!");
-  const [milestoneReached, setMilestoneReached] = useState(null);
+  const [leads, setLeads] = useState(Array.isArray(initialSaved.leads) ? initialSaved.leads : []);
+  const [newLeadName, setNewLeadName] = useState('');
+  const [newLeadSdr, setNewLeadSdr] = useState('juan');
 
-  // Estado dos No-Shows
-  const [leads, setLeads] = useState(initialMonthData.leads ?? []);
-  const [newLeadName, setNewLeadName] = useState("");
-  const [newLeadSdr, setNewLeadSdr] = useState("juan");
-
-  // Estado das Dicas
   const [currentTip, setCurrentTip] = useState(0);
 
-  // controle de celebrações (pra não disparar toda hora)
-  const [celebrated, setCelebrated] = useState(
-    initialMonthData.celebrated ?? { team: [], juan: [], heloisa: [] }
-  );
-
   // =====================
-  // HISTÓRICO (meses antigos)
+  // SALVAR AUTOMATICAMENTE (não perde no F5)
   // =====================
-  const monthsKeys = Object.keys(savedAllRef.current.months || {});
-  const historyMonths = monthsKeys.filter((k) => k !== currentMonthKey).sort().reverse();
-  const [historyOpen, setHistoryOpen] = useState(false);
-  const [historySelected, setHistorySelected] = useState(historyMonths[0] || "");
-
   useEffect(() => {
-    if (!historySelected && historyMonths.length) setHistorySelected(historyMonths[0]);
-  }, [historyMonths, historySelected]);
-
-  const historyData = historySelected ? savedAllRef.current.months[historySelected] : null;
+    saveMonthState(monthKeyState, { juanScore, heloisaScore, meetingsList, leads });
+    const idx = ensureMonthInIndex(monthKeyState);
+    setMonthsIndexState(idx);
+  }, [monthKeyState, juanScore, heloisaScore, meetingsList, leads]);
 
   // =====================
-  // LOG PARA SHEETS
+  // ZERAR AO VIRAR O MÊS (mantém histórico)
   // =====================
-  const monthKeyForSheets = currentMonthKey;
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const nowKey = getMonthKey();
+      if (nowKey !== monthKeyState) {
+        // mudou de mês -> zera placar do mês novo
+        setMonthKeyState(nowKey);
 
-  const logEvent = async (payload) => {
-    try {
-      const res = await fetch("/api/log", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json().catch(() => null);
-      if (!res.ok) {
-        console.warn("logEvent failed:", res.status, data);
+        setJuanScore(0);
+        setHeloisaScore(0);
+        setMeetingsList([]);
+        setLeads([]);
+
+        setSchedulingPlayer(null);
+        setMeetingForm({ date: '', opportunity: '', ae: 'Jânio' });
+
+        const idx = ensureMonthInIndex(nowKey);
+        setMonthsIndexState(idx);
+
+        // reseta histórico padrão
+        setHistoryMonthKey(chooseDefaultHistoryMonth(nowKey, idx));
+
+        // reseta referências de celebração (importante)
+        lastCelebratedTeamTargetRef.current = 0;
+        lastCelebratedJuanTargetRef.current = 0;
+        lastCelebratedHeloTargetRef.current = 0;
+        celebrationQueueRef.current = [];
+        setCelebrationPayload(null);
       }
-    } catch (e) {
-      console.warn("logEvent error:", e);
-    }
-  };
+    }, 60 * 1000); // checa a cada 1 minuto
+
+    return () => clearInterval(interval);
+  }, [monthKeyState]);
 
   // =====================
-  // SALVAR ESTADO DO MÊS
-  // =====================
-  useEffect(() => {
-    // atualiza o mês atual no ref
-    savedAllRef.current.months[currentMonthKey] = {
-      juanScore,
-      heloisaScore,
-      meetingsList,
-      leads,
-      celebrated,
-    };
-    savedAllRef.current.currentMonth = currentMonthKey;
-
-    saveStateAll(savedAllRef.current);
-  }, [juanScore, heloisaScore, meetingsList, leads, celebrated, currentMonthKey]);
-
-  // =====================
-  // Cálculos de Progresso
+  // CÁLCULOS (EQUIPE)
   // =====================
   const totalScore = juanScore + heloisaScore;
 
-  const currentMilestone = [...MILESTONES].reverse().find((m) => totalScore >= m.target);
-  const nextMilestone =
-    MILESTONES.find((m) => totalScore < m.target) || MILESTONES[MILESTONES.length - 1];
+  const currentMilestone = useMemo(
+    () => [...MILESTONES].reverse().find((m) => totalScore >= m.target),
+    [totalScore]
+  );
 
-  const overallProgress = Math.min(100, (totalScore / MILESTONES[MILESTONES.length - 1].target) * 100);
+  const nextMilestone = useMemo(
+    () => MILESTONES.find((m) => totalScore < m.target) || MILESTONES[MILESTONES.length - 1],
+    [totalScore]
+  );
 
-  // metas individuais (metade das metas da equipe)
-  const INDIVIDUAL_MILESTONES = MILESTONES.map((m) => ({
-    target: Math.ceil(m.target / 2),
-    label: m.label,
-    percent: m.percent,
-  }));
+  const overallProgress = useMemo(() => {
+    const goal = MILESTONES[MILESTONES.length - 1].target;
+    return Math.min(100, (totalScore / goal) * 100);
+  }, [totalScore]);
+
+  const progressToNext = useMemo(() => {
+    const currentTarget = currentMilestone ? currentMilestone.target : 0;
+    const nextTarget = nextMilestone ? nextMilestone.target : currentTarget;
+    if (nextTarget === currentTarget) return 100;
+    const pct = ((totalScore - currentTarget) / (nextTarget - currentTarget)) * 100;
+    return Math.min(100, Math.max(0, pct));
+  }, [totalScore, currentMilestone, nextMilestone]);
 
   // =====================
-  // Efeito de Rotação das Dicas
+  // CÁLCULOS (INDIVIDUAL)
+  // =====================
+  const currentJuanMilestone = useMemo(
+    () => [...INDIVIDUAL_MILESTONES].reverse().find((m) => juanScore >= m.target),
+    [juanScore]
+  );
+  const currentHeloMilestone = useMemo(
+    () => [...INDIVIDUAL_MILESTONES].reverse().find((m) => heloisaScore >= m.target),
+    [heloisaScore]
+  );
+
+  const nextJuanMilestone = useMemo(
+    () => INDIVIDUAL_MILESTONES.find((m) => juanScore < m.target) || INDIVIDUAL_MILESTONES[INDIVIDUAL_MILESTONES.length - 1],
+    [juanScore]
+  );
+  const nextHeloMilestone = useMemo(
+    () => INDIVIDUAL_MILESTONES.find((m) => heloisaScore < m.target) || INDIVIDUAL_MILESTONES[INDIVIDUAL_MILESTONES.length - 1],
+    [heloisaScore]
+  );
+
+  // =====================
+  // CELEBRAÇÕES (EQUIPE + INDIVIDUAL) COM FILA
+  // =====================
+  const [celebrationPayload, setCelebrationPayload] = useState(null); // {scope,title,subtitle}
+  const celebrationQueueRef = useRef([]);
+
+  const lastCelebratedTeamTargetRef = useRef(currentMilestone?.target ?? 0);
+  const lastCelebratedJuanTargetRef = useRef(currentJuanMilestone?.target ?? 0);
+  const lastCelebratedHeloTargetRef = useRef(currentHeloMilestone?.target ?? 0);
+
+  const enqueueCelebration = (payload) => {
+    if (!payload) return;
+    if (!celebrationPayload) setCelebrationPayload(payload);
+    else celebrationQueueRef.current.push(payload);
+  };
+
+  // puxa próximo da fila quando fecha
+  useEffect(() => {
+    if (!celebrationPayload && celebrationQueueRef.current.length > 0) {
+      setCelebrationPayload(celebrationQueueRef.current.shift());
+    }
+  }, [celebrationPayload]);
+
+  // auto-fecha em 5s
+  useEffect(() => {
+    if (!celebrationPayload) return;
+    const t = setTimeout(() => setCelebrationPayload(null), 5000);
+    return () => clearTimeout(t);
+  }, [celebrationPayload]);
+
+  // equipe: celebra quando passa para um marco maior
+  useEffect(() => {
+    const newTarget = currentMilestone?.target ?? 0;
+    if (newTarget > lastCelebratedTeamTargetRef.current) {
+      lastCelebratedTeamTargetRef.current = newTarget;
+
+      enqueueCelebration({
+        scope: 'team',
+        title: 'META DA EQUIPE ATINGIDA!',
+        subtitle: `${currentMilestone.percent}% • ${currentMilestone.label} • ${newTarget} reuniões`,
+      });
+    }
+  }, [currentMilestone?.target]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Juan: celebra quando passa para um marco maior
+  useEffect(() => {
+    const newTarget = currentJuanMilestone?.target ?? 0;
+    if (newTarget > lastCelebratedJuanTargetRef.current) {
+      lastCelebratedJuanTargetRef.current = newTarget;
+
+      enqueueCelebration({
+        scope: 'juan',
+        title: 'META INDIVIDUAL ATINGIDA!',
+        subtitle: `🧊 Juan • ${currentJuanMilestone.percent}% • ${newTarget} reuniões`,
+      });
+    }
+  }, [currentJuanMilestone?.target]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Heloísa: celebra quando passa para um marco maior
+  useEffect(() => {
+    const newTarget = currentHeloMilestone?.target ?? 0;
+    if (newTarget > lastCelebratedHeloTargetRef.current) {
+      lastCelebratedHeloTargetRef.current = newTarget;
+
+      enqueueCelebration({
+        scope: 'heloisa',
+        title: 'META INDIVIDUAL ATINGIDA!',
+        subtitle: `🔥 Heloísa • ${currentHeloMilestone.percent}% • ${newTarget} reuniões`,
+      });
+    }
+  }, [currentHeloMilestone?.target]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // =====================
+  // ROTACIONAR DICAS
   // =====================
   useEffect(() => {
     const interval = setInterval(() => {
@@ -234,234 +357,163 @@ export default function SdrQuest() {
   }, []);
 
   // =====================
-  // Monitorar alcance de metas para disparar fogos (Equipe + Individual)
+  // HISTÓRICO (CARD abaixo do Radar)
   // =====================
-  useEffect(() => {
-    // TEAM
-    if (currentMilestone && currentMilestone.target > 0 && !celebrated.team.includes(currentMilestone.target)) {
-      setCelebrated((prev) => ({ ...prev, team: [...prev.team, currentMilestone.target] }));
-      setMilestoneReached(currentMilestone);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [historyMonthKey, setHistoryMonthKey] = useState(() =>
+    chooseDefaultHistoryMonth(getMonthKey(), getMonthsIndex())
+  );
 
-      setCelebrationTitle("META DE EQUIPE!");
-      setCelebrationSubtitle(`${currentMilestone.percent}% • ${currentMilestone.label}`);
-      setCelebrating(true);
-      setTimeout(() => setCelebrating(false), 5000);
-    }
+  const historyData = useMemo(() => {
+    const data = loadMonthState(historyMonthKey);
+    return data ? data : null;
+  }, [historyMonthKey, monthsIndex]);
 
-    // JUAN
-    const juanMilestone = [...INDIVIDUAL_MILESTONES].reverse().find((m) => juanScore >= m.target);
-    if (juanMilestone && !celebrated.juan.includes(juanMilestone.target)) {
-      setCelebrated((prev) => ({ ...prev, juan: [...prev.juan, juanMilestone.target] }));
-
-      setCelebrationTitle("META INDIVIDUAL!");
-      setCelebrationSubtitle(`Juan atingiu ${juanMilestone.target} reuniões (${juanMilestone.label})`);
-      setCelebrating(true);
-      setTimeout(() => setCelebrating(false), 5000);
-    }
-
-    // HELOÍSA
-    const helMilestone = [...INDIVIDUAL_MILESTONES].reverse().find((m) => heloisaScore >= m.target);
-    if (helMilestone && !celebrated.heloisa.includes(helMilestone.target)) {
-      setCelebrated((prev) => ({ ...prev, heloisa: [...prev.heloisa, helMilestone.target] }));
-
-      setCelebrationTitle("META INDIVIDUAL!");
-      setCelebrationSubtitle(`Heloísa atingiu ${helMilestone.target} reuniões (${helMilestone.label})`);
-      setCelebrating(true);
-      setTimeout(() => setCelebrating(false), 5000);
-    }
-  }, [currentMilestone?.target, juanScore, heloisaScore, celebrated, INDIVIDUAL_MILESTONES]);
+  const historySummary = useMemo(() => {
+    if (!historyData) return null;
+    const j = Number(historyData.juanScore || 0);
+    const h = Number(historyData.heloisaScore || 0);
+    const total = j + h;
+    const mCount = Array.isArray(historyData.meetingsList) ? historyData.meetingsList.length : 0;
+    const lCount = Array.isArray(historyData.leads) ? historyData.leads.length : 0;
+    return { total, j, h, mCount, lCount };
+  }, [historyData]);
 
   // =====================
   // FUNÇÕES DE AÇÃO
   // =====================
+// ✅ Envia evento para o Google Sheets via Vercel API
+const logEvent = async (payload) => {
+  try {
+    await fetch("/api/log", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      keepalive: true,
+    });
+  } catch (e) {
+    console.warn("Falha ao logar no Sheets:", e);
+  }
+};
+
+// ✅ mês (YYYY-MM) somente para registro no Sheets
+const monthKeyForSheets = new Date().toISOString().slice(0, 7);
   const handleScheduleSubmit = (e) => {
     e.preventDefault();
+    if (!meetingForm.date || !meetingForm.opportunity) return;
 
-    const opp = normalizeText(meetingForm.opportunity);
-    if (!meetingForm.date || !opp) return;
+    // adiciona no topo (evita bug de state)
+    setMeetingsList((prev) => [{ ...meetingForm, sdr: schedulingPlayer, id: Date.now() }, ...prev]);
 
-    const newMeeting = { ...meetingForm, opportunity: opp, sdr: schedulingPlayer, id: Date.now() };
+    if (schedulingPlayer === 'juan') setJuanScore((s) => s + 1);
+    if (schedulingPlayer === 'heloisa') setHeloisaScore((s) => s + 1);
 
-    // ✅ AGORA REGISTRA NO SHEETS (criado)
+    setSchedulingPlayer(null);
+    setMeetingForm({ date: '', opportunity: '', ae: 'Jânio' });
+  };
+
+  const removeMeeting = (player) => {
+    if (player === 'juan' && juanScore > 0) {
+      setJuanScore((s) => s - 1);
+      setMeetingsList((prev) => {
+  const index = prev.findIndex((m) => m.sdr === "juan");
+  if (index !== -1) {
+    const removed = prev[index];
+
+    // log no Sheets (deletado)
     logEvent({
       tipo: "reuniao",
-      status: "",
-      meetingId: String(newMeeting.id),
-      sdr: newMeeting.sdr,
-      ae: newMeeting.ae,
-      oportunidade: newMeeting.opportunity,
-      dataReuniao: newMeeting.date,
+      status: "[deletado]",
+      meetingId: String(removed.id),
+      sdr: removed.sdr,
+      ae: removed.ae,
+      oportunidade: removed.opportunity,
+      dataReuniao: removed.date,
       noShowCount: "",
       monthKey: monthKeyForSheets,
-      observacao: "criado",
+      observacao: "clicou -1",
     });
 
-    // adiciona no topo
-    setMeetingsList((prev) => [newMeeting, ...prev]);
-
-    // Pontua
-    if (schedulingPlayer === "juan") setJuanScore((s) => s + 1);
-    if (schedulingPlayer === "heloisa") setHeloisaScore((s) => s + 1);
-
-    // Reseta form
-    setSchedulingPlayer(null);
-    setMeetingForm({ date: "", opportunity: "", ae: "Jânio" });
-  };
-
-  // remove um agendamento específico (X no feed)
-  const deleteMeetingById = (id) => {
-    setMeetingsList((prev) => {
-      const index = prev.findIndex((m) => m.id === id);
-      if (index === -1) return prev;
-
-      const removed = prev[index];
-
-      if (removed.sdr === "juan") setJuanScore((s) => Math.max(0, s - 1));
-      if (removed.sdr === "heloisa") setHeloisaScore((s) => Math.max(0, s - 1));
-
-      // ✅ marca deletado no Sheets
-      logEvent({
-        tipo: "reuniao",
-        status: "[deletado]",
-        meetingId: String(removed.id),
-        sdr: removed.sdr,
-        ae: removed.ae,
-        oportunidade: removed.opportunity,
-        dataReuniao: removed.date,
-        noShowCount: "",
-        monthKey: monthKeyForSheets,
-        observacao: "removido no feed (X)",
-      });
-
-      const newList = [...prev];
-      newList.splice(index, 1);
-      return newList;
-    });
-  };
-
-  // -1 (remove o mais recente do SDR)
-  const removeMeeting = (player) => {
-    if (player === "juan" && juanScore > 0) {
-      setJuanScore((s) => Math.max(0, s - 1));
-      setMeetingsList((prev) => {
-        const index = prev.findIndex((m) => m.sdr === "juan");
-        if (index !== -1) {
-          const removed = prev[index];
-
-          // log no Sheets (deletado)
-          logEvent({
-            tipo: "reuniao",
-            status: "[deletado]",
-            meetingId: String(removed.id),
-            sdr: removed.sdr,
-            ae: removed.ae,
-            oportunidade: removed.opportunity,
-            dataReuniao: removed.date,
-            noShowCount: "",
-            monthKey: monthKeyForSheets,
-            observacao: "clicou -1",
-          });
-
-          const newList = [...prev];
-          newList.splice(index, 1);
-          return newList;
-        }
-        return prev;
-      });
+    const newList = [...prev];
+    newList.splice(index, 1);
+    return newList;
+  }
+  return prev;
+});
     }
 
-    if (player === "heloisa" && heloisaScore > 0) {
-      setHeloisaScore((s) => Math.max(0, s - 1));
+    if (player === 'heloisa' && heloisaScore > 0) {
+      setHeloisaScore((s) => s - 1);
       setMeetingsList((prev) => {
-        const index = prev.findIndex((m) => m.sdr === "heloisa");
-        if (index !== -1) {
-          const removed = prev[index];
+  const index = prev.findIndex((m) => m.sdr === "heloisa");
+  if (index !== -1) {
+    const removed = prev[index];
 
-          // log no Sheets (deletado)
-          logEvent({
-            tipo: "reuniao",
-            status: "[deletado]",
-            meetingId: String(removed.id),
-            sdr: removed.sdr,
-            ae: removed.ae,
-            oportunidade: removed.opportunity,
-            dataReuniao: removed.date,
-            noShowCount: "",
-            monthKey: monthKeyForSheets,
-            observacao: "clicou -1",
-          });
+    // log no Sheets (deletado)
+    logEvent({
+      tipo: "reuniao",
+      status: "[deletado]",
+      meetingId: String(removed.id),
+      sdr: removed.sdr,
+      ae: removed.ae,
+      oportunidade: removed.opportunity,
+      dataReuniao: removed.date,
+      noShowCount: "",
+      monthKey: monthKeyForSheets,
+      observacao: "clicou -1",
+    });
 
-          const newList = [...prev];
-          newList.splice(index, 1);
-          return newList;
-        }
-        return prev;
-      });
+    const newList = [...prev];
+    newList.splice(index, 1);
+    return newList;
+  }
+  return prev;
+});
     }
   };
 
   const handleAddNoShow = (e) => {
     e.preventDefault();
-    const company = normalizeText(newLeadName);
-    if (!company) return;
+    if (!newLeadName.trim()) return;
 
     const existingLeadIndex = leads.findIndex(
-      (l) => normalizeText(l.name).toLowerCase() === company.toLowerCase() && l.sdr === newLeadSdr
+      (l) => l.name.toLowerCase() === newLeadName.toLowerCase() && l.sdr === newLeadSdr
     );
 
     if (existingLeadIndex >= 0) {
       const updatedLeads = [...leads];
       updatedLeads[existingLeadIndex].noShows += 1;
-      const newCount = updatedLeads[existingLeadIndex].noShows;
+const newCount = updatedLeads[existingLeadIndex].noShows;
 
-      // ✅ no Sheets: atualiza NoShowCount (não empilha)
-      logEvent({
-        tipo: "no-show",
-        status: "", // status vazio, NoShowCount mostra 1/2/3
-        meetingId: "",
-        sdr: updatedLeads[existingLeadIndex].sdr,
-        ae: "",
-        oportunidade: updatedLeads[existingLeadIndex].name,
-        dataReuniao: "",
-        noShowCount: newCount,
-        monthKey: monthKeyForSheets,
-        observacao: `no-show ${newCount}`,
-      });
+// log no Sheets (no-show)
+logEvent({
+  tipo: "no-show",
+  status: "",                 // ✅ deixa vazio (NoShowCount já representa o no-show)
+  meetingId: "",
+  sdr: updatedLeads[existingLeadIndex].sdr,
+  ae: "",
+  oportunidade: updatedLeads[existingLeadIndex].name,
+  dataReuniao: "",
+  noShowCount: newCount,      // ✅ 1, 2 ou 3
+  monthKey: monthKeyForSheets,
+  observacao: `no-show ${newCount}`, // ✅ mostra 1/2/3 na observação
+});
 
-      // Regra do 3º no-show: penaliza o SDR responsável e remove o agendamento
+      // 3º no-show: penaliza e remove agendamento
       if (updatedLeads[existingLeadIndex].noShows === 3) {
         const penalizedSdr = updatedLeads[existingLeadIndex].sdr;
         const leadName = updatedLeads[existingLeadIndex].name;
 
-        if (penalizedSdr === "juan") setJuanScore((s) => Math.max(0, s - 1));
+        if (penalizedSdr === 'juan') setJuanScore((s) => Math.max(0, s - 1));
         else setHeloisaScore((s) => Math.max(0, s - 1));
 
         setMeetingsList((prev) => {
           let index = prev.findIndex(
-            (m) =>
-              m.sdr === penalizedSdr &&
-              normalizeText(m.opportunity).toLowerCase() === normalizeText(leadName).toLowerCase()
+            (m) => m.sdr === penalizedSdr && (m.opportunity || '').toLowerCase() === leadName.toLowerCase()
           );
-
           if (index === -1) index = prev.findIndex((m) => m.sdr === penalizedSdr);
 
           if (index !== -1) {
-            const removed = prev[index];
-
-            // (opcional) marca deletado por penalidade no Sheets
-            logEvent({
-              tipo: "reuniao",
-              status: "[deletado]",
-              meetingId: String(removed.id),
-              sdr: removed.sdr,
-              ae: removed.ae,
-              oportunidade: removed.opportunity,
-              dataReuniao: removed.date,
-              noShowCount: "",
-              monthKey: monthKeyForSheets,
-              observacao: "penalidade 3º no-show (removeu 1)",
-            });
-
             const newList = [...prev];
             newList.splice(index, 1);
             return newList;
@@ -472,30 +524,26 @@ export default function SdrQuest() {
 
       setLeads(updatedLeads);
     } else {
-      const newLead = { id: Date.now(), name: company, sdr: newLeadSdr, noShows: 1 };
-
-      // ✅ no Sheets: cria/atualiza NoShowCount=1
-      logEvent({
-        tipo: "no-show",
-        status: "",
-        meetingId: "",
-        sdr: newLead.sdr,
-        ae: "",
-        oportunidade: newLead.name,
-        dataReuniao: "",
-        noShowCount: 1,
-        monthKey: monthKeyForSheets,
-        observacao: "no-show 1",
-      });
-
-      setLeads([newLead, ...leads]);
+      setLeads([{ id: Date.now(), name: newLeadName, sdr: newLeadSdr, noShows: 1 }, ...leads]);
     }
 
-    setNewLeadName("");
+    setNewLeadName('');
   };
 
-  const removeLead = (id) => {
-    setLeads((prev) => prev.filter((l) => l.id !== id));
+  const removeLead = (id) => setLeads(leads.filter((l) => l.id !== id));
+
+  const resetCurrentMonth = () => {
+    setJuanScore(0);
+    setHeloisaScore(0);
+    setMeetingsList([]);
+    setLeads([]);
+
+    // reseta refs de celebração também
+    lastCelebratedTeamTargetRef.current = 0;
+    lastCelebratedJuanTargetRef.current = 0;
+    lastCelebratedHeloTargetRef.current = 0;
+    celebrationQueueRef.current = [];
+    setCelebrationPayload(null);
   };
 
   // =====================
@@ -512,19 +560,17 @@ export default function SdrQuest() {
             66% { transform: translate(-20px, 20px) scale(0.9); }
             100% { transform: translate(0px, 0px) scale(1); }
           }
-          .animate-blob {
-            animation: blob 15s infinite alternate ease-in-out;
-          }
-          .animation-delay-4000 {
-            animation-delay: 4s;
-          }
+          .animate-blob { animation: blob 15s infinite alternate ease-in-out; }
+          .animation-delay-4000 { animation-delay: 4s; }
         `}
       </style>
-      <div className="absolute top-[-10%] left-[-10%] w-[500px] h-[500px] bg-cyan-600/20 rounded-full blur-[120px] pointer-events-none animate-blob" />
-      <div className="absolute bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-purple-600/20 rounded-full blur-[120px] pointer-events-none animate-blob animation-delay-4000" />
+      <div className="absolute top-[-10%] left-[-10%] w-[500px] h-[500px] bg-cyan-600/20 rounded-full blur-[120px] pointer-events-none animate-blob"></div>
+      <div className="absolute bottom-[-10%] right-[-10%] w-[500px] h-[500px] bg-purple-600/20 rounded-full blur-[120px] pointer-events-none animate-blob animation-delay-4000"></div>
 
-      {/* FIREWORKS CANVAS (Condicional) */}
-      {celebrating && <FireworksCanvas title={celebrationTitle} subtitle={celebrationSubtitle} />}
+      {/* FOGOS */}
+      {celebrationPayload && (
+        <FireworksCanvas scope={celebrationPayload.scope} title={celebrationPayload.title} subtitle={celebrationPayload.subtitle} />
+      )}
 
       {/* HEADER */}
       <header className="relative z-10 flex flex-col md:flex-row justify-between items-center mb-8 gap-6">
@@ -535,9 +581,10 @@ export default function SdrQuest() {
           </h1>
           <div className="flex flex-col w-fit">
             <p className="text-slate-400 text-sm mt-1 tracking-widest uppercase">Operação Máquina de Vendas</p>
-            <p className="text-slate-500 text-[10px] tracking-widest uppercase text-right mt-0.5 font-bold">
-              Powered by Vittel
-            </p>
+            <p className="text-slate-500 text-[10px] tracking-widest uppercase text-right mt-0.5 font-bold">Powered by Vittel</p>
+          </div>
+          <div className="mt-2 text-xs text-slate-500">
+            Mês ativo: <span className="text-slate-200 font-bold">{monthLabelPt(monthKeyState)}</span>
           </div>
         </div>
 
@@ -546,9 +593,7 @@ export default function SdrQuest() {
           <div className="flex justify-between items-end mb-2">
             <div>
               <span className="text-2xl font-bold text-white">{totalScore}</span>
-              <span className="text-slate-400 text-sm ml-2">
-                / {MILESTONES[MILESTONES.length - 1].target} Reuniões Totais
-              </span>
+              <span className="text-slate-400 text-sm ml-2">/ {MILESTONES[MILESTONES.length - 1].target} Reuniões Totais</span>
             </div>
             <div className="text-right">
               <span className="text-cyan-400 font-mono font-bold text-xl">{currentMilestone ? currentMilestone.percent : 0}%</span>
@@ -559,20 +604,34 @@ export default function SdrQuest() {
             <div
               className="absolute top-0 left-0 h-full bg-gradient-to-r from-cyan-500 to-purple-500 transition-all duration-1000 ease-out shadow-[0_0_10px_rgba(6,182,212,0.8)]"
               style={{ width: `${overallProgress}%` }}
-            />
+            ></div>
           </div>
 
           <div className="flex justify-between mt-2 text-xs font-mono text-slate-500">
             {MILESTONES.map((m, i) => (
-              <div key={i} className={`flex flex-col items-center ${totalScore >= m.target ? "text-cyan-400" : ""}`}>
-                <div
-                  className={`w-1 h-1 rounded-full mb-1 ${
-                    totalScore >= m.target ? "bg-cyan-400 shadow-[0_0_5px_#22d3ee]" : "bg-slate-700"
-                  }`}
-                />
+              <div key={i} className={`flex flex-col items-center ${totalScore >= m.target ? 'text-cyan-400' : ''}`}>
+                <div className={`w-1 h-1 rounded-full mb-1 ${totalScore >= m.target ? 'bg-cyan-400 shadow-[0_0_5px_#22d3ee]' : 'bg-slate-700'}`}></div>
                 {m.percent}%
               </div>
             ))}
+          </div>
+
+          <div className="mt-3 flex items-center justify-between text-xs text-slate-400">
+            <div>
+              Próximo marco: <span className="text-slate-200 font-bold">{nextMilestone.percent}%</span> •{' '}
+              <span className="text-slate-300">{nextMilestone.label}</span>
+            </div>
+            <div className="text-slate-500 font-mono">{Math.round(progressToNext)}% até o próximo</div>
+          </div>
+
+          <div className="mt-3 flex items-center justify-end gap-2">
+            <button
+              onClick={resetCurrentMonth}
+              className="text-xs text-slate-400 hover:text-white bg-slate-800/50 border border-slate-700/50 px-3 py-2 rounded-lg transition-colors"
+              title="Zerar mês atual (não apaga histórico)"
+            >
+              Resetar mês
+            </button>
           </div>
         </div>
       </header>
@@ -583,9 +642,9 @@ export default function SdrQuest() {
         <PlayerCard
           name="Juan"
           score={juanScore}
-          target={nextMilestone.target / 2}
-          onAdd={() => setSchedulingPlayer("juan")}
-          onRemove={() => removeMeeting("juan")}
+          target={nextJuanMilestone.target}
+          onAdd={() => setSchedulingPlayer('juan')}
+          onRemove={() => removeMeeting('juan')}
           color="cyan"
         />
 
@@ -593,7 +652,7 @@ export default function SdrQuest() {
         <div className="flex flex-col gap-6">
           {/* SPICED WIDGET */}
           <div className="bg-slate-900/60 border border-slate-700/50 rounded-2xl p-6 backdrop-blur-sm relative overflow-hidden group">
-            <div className="absolute top-0 right-0 w-32 h-32 bg-purple-500/10 rounded-full blur-3xl transition-all group-hover:bg-purple-500/20" />
+            <div className="absolute top-0 right-0 w-32 h-32 bg-purple-500/10 rounded-full blur-3xl transition-all group-hover:bg-purple-500/20"></div>
             <h3 className="text-slate-400 font-bold tracking-widest text-xs mb-4 flex items-center gap-2 uppercase">
               <Flame className="w-4 h-4 text-orange-500" />
               Framework SPICED
@@ -609,10 +668,7 @@ export default function SdrQuest() {
 
             <div className="flex gap-1 mt-4">
               {SPICED_TIPS.map((_, idx) => (
-                <div
-                  key={idx}
-                  className={`h-1 flex-1 rounded-full transition-all duration-500 ${idx === currentTip ? "bg-purple-500" : "bg-slate-800"}`}
-                />
+                <div key={idx} className={`h-1 flex-1 rounded-full transition-all duration-500 ${idx === currentTip ? 'bg-purple-500' : 'bg-slate-800'}`} />
               ))}
             </div>
           </div>
@@ -620,11 +676,11 @@ export default function SdrQuest() {
           {/* NEXT MILESTONE */}
           <div className="bg-slate-900/60 border border-slate-700/50 rounded-2xl p-6 backdrop-blur-sm text-center">
             <Target className="w-8 h-8 text-cyan-400 mx-auto mb-2 opacity-80" />
-            <h4 className="text-slate-400 text-sm">Próximo Alvo</h4>
+            <h4 className="text-slate-400 text-sm">Próximo Alvo (Equipe)</h4>
             <div className="text-2xl font-bold text-white mb-1">
               {nextMilestone.percent}% ({nextMilestone.label})
             </div>
-            <div className="text-sm text-slate-500">Faltam {nextMilestone.target - totalScore} reuniões no total</div>
+            <div className="text-sm text-slate-500">Faltam {Math.max(0, nextMilestone.target - totalScore)} reuniões no total</div>
           </div>
         </div>
 
@@ -632,9 +688,9 @@ export default function SdrQuest() {
         <PlayerCard
           name="Heloísa"
           score={heloisaScore}
-          target={nextMilestone.target / 2}
-          onAdd={() => setSchedulingPlayer("heloisa")}
-          onRemove={() => removeMeeting("heloisa")}
+          target={nextHeloMilestone.target}
+          onAdd={() => setSchedulingPlayer('heloisa')}
+          onRemove={() => removeMeeting('heloisa')}
           color="purple"
         />
 
@@ -651,41 +707,20 @@ export default function SdrQuest() {
           </div>
 
           {isMeetingsFeedOpen && (
-            <div className="flex gap-4 overflow-x-auto mt-4 pb-2 animate-in fade-in slide-in-from-top-2 duration-300">
+            <div className="flex gap-4 overflow-x-auto mt-4 pb-2">
               {meetingsList.length === 0 ? (
                 <p className="text-slate-500 italic text-sm">Nenhum agendamento registrado ainda hoje.</p>
               ) : (
                 meetingsList.map((meeting) => (
-                  <div
-                    key={meeting.id}
-                    className="min-w-[250px] bg-slate-800/50 border border-slate-700 rounded-xl p-4 flex flex-col gap-2"
-                  >
-                    {/* ✅ BLOCO CORRIGIDO (sem tags sobrando) + X para deletar */}
-                    <div className="flex justify-between items-start gap-2">
-                      <span className="font-bold text-white truncate flex-1" title={meeting.opportunity}>
+                  <div key={meeting.id} className="min-w-[250px] bg-slate-800/50 border border-slate-700 rounded-xl p-4 flex flex-col gap-2">
+                    <div className="flex justify-between items-start">
+                      <span className="font-bold text-white truncate" title={meeting.opportunity}>
                         {meeting.opportunity}
                       </span>
-
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`text-xs font-bold px-2 py-1 rounded bg-slate-900 ${
-                            meeting.sdr === "juan" ? "text-cyan-400" : "text-purple-400"
-                          }`}
-                        >
-                          {meeting.sdr === "juan" ? "Juan" : "Heloísa"}
-                        </span>
-
-                        <button
-                          type="button"
-                          onClick={() => deleteMeetingById(meeting.id)}
-                          className="text-slate-400 hover:text-white bg-slate-900/60 hover:bg-slate-900 px-2 py-1 rounded"
-                          title="Remover este agendamento"
-                        >
-                          ×
-                        </button>
-                      </div>
+                      <span className={`text-xs font-bold px-2 py-1 rounded bg-slate-900 ${meeting.sdr === 'juan' ? 'text-cyan-400' : 'text-purple-400'}`}>
+                        {meeting.sdr === 'juan' ? 'Juan' : 'Heloísa'}
+                      </span>
                     </div>
-
                     <div className="flex items-center gap-2 text-xs text-slate-400">
                       <Calendar className="w-3 h-3" /> {meeting.date}
                     </div>
@@ -747,10 +782,10 @@ export default function SdrQuest() {
                   key={lead.id}
                   className={`p-4 rounded-xl border relative overflow-hidden flex flex-col justify-between transition-all ${
                     lead.noShows >= 3
-                      ? "bg-red-950/30 border-red-500/50 shadow-[0_0_15px_rgba(239,68,68,0.2)]"
+                      ? 'bg-red-950/30 border-red-500/50 shadow-[0_0_15px_rgba(239,68,68,0.2)]'
                       : lead.noShows === 2
-                      ? "bg-yellow-950/30 border-yellow-500/50"
-                      : "bg-slate-800/50 border-slate-700"
+                      ? 'bg-yellow-950/30 border-yellow-500/50'
+                      : 'bg-slate-800/50 border-slate-700'
                   }`}
                 >
                   <div className="flex justify-between items-start mb-4">
@@ -767,9 +802,9 @@ export default function SdrQuest() {
                   </div>
 
                   <div className="text-xs text-slate-400 mb-3 flex items-center gap-1">
-                    <User className="w-3 h-3" /> SDR:{" "}
-                    <span className={lead.sdr === "juan" ? "text-cyan-400" : "text-purple-400"}>
-                      {lead.sdr === "juan" ? "Juan" : "Heloísa"}
+                    <User className="w-3 h-3" /> SDR:{' '}
+                    <span className={lead.sdr === 'juan' ? 'text-cyan-400' : 'text-purple-400'}>
+                      {lead.sdr === 'juan' ? 'Juan' : 'Heloísa'}
                     </span>
                   </div>
 
@@ -780,13 +815,13 @@ export default function SdrQuest() {
                         className={`h-2 flex-1 rounded-sm ${
                           strike <= lead.noShows
                             ? strike === 3
-                              ? "bg-red-500 shadow-[0_0_8px_#ef4444]"
+                              ? 'bg-red-500 shadow-[0_0_8px_#ef4444]'
                               : strike === 2
-                              ? "bg-yellow-500"
-                              : "bg-slate-400"
-                            : "bg-slate-800"
+                              ? 'bg-yellow-500'
+                              : 'bg-slate-400'
+                            : 'bg-slate-800'
                         }`}
-                      />
+                      ></div>
                     ))}
                   </div>
 
@@ -807,58 +842,142 @@ export default function SdrQuest() {
           </div>
         </div>
 
-        {/* HISTÓRICO (abaixo do Radar) */}
-        <div className="lg:col-span-3 bg-slate-900/60 border border-slate-700/50 rounded-2xl p-6 backdrop-blur-md">
-          <div className="flex items-center justify-between">
-            <h3 className="text-xl font-bold text-white">Histórico (meses anteriores)</h3>
-            <button
-              type="button"
-              onClick={() => setHistoryOpen((s) => !s)}
-              className="text-slate-300 hover:text-white bg-slate-800/50 hover:bg-slate-800 px-3 py-2 rounded-lg"
-            >
-              {historyOpen ? "Fechar" : "Abrir"}
-            </button>
+        {/* HISTÓRICO (ABAIXO DO RADAR) */}
+        <div className="lg:col-span-3 bg-slate-900/60 border border-slate-700/50 rounded-2xl p-6 backdrop-blur-md transition-all">
+          <div className="flex justify-between items-center cursor-pointer select-none" onClick={() => setIsHistoryOpen((v) => !v)}>
+            <h3 className="text-xl font-bold text-white flex items-center gap-2 hover:text-cyan-400 transition-colors">
+              <RefreshCw className="w-5 h-5 text-cyan-400" />
+              Histórico (mês anterior e anteriores)
+            </h3>
+            <div className="text-slate-400 hover:text-white transition-colors bg-slate-800/50 p-1.5 rounded-lg">
+              {isHistoryOpen ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
+            </div>
           </div>
 
-          {historyOpen && (
-            <div className="mt-4">
-              {historyMonths.length === 0 ? (
-                <p className="text-slate-500 text-sm">Ainda não há meses anteriores registrados.</p>
+          <div className="mt-4 flex flex-col md:flex-row gap-3 md:items-center md:justify-between">
+            <div className="text-sm text-slate-400">
+              O placar zera automaticamente na virada do mês. O histórico fica salvo para consulta.
+            </div>
+
+            <div className="flex gap-2 items-center">
+              <span className="text-xs text-slate-500">Mês:</span>
+              <select
+                value={historyMonthKey}
+                onChange={(e) => setHistoryMonthKey(e.target.value)}
+                className="bg-slate-950 border border-slate-700 text-white px-3 py-2 rounded-lg focus:outline-none focus:border-cyan-500 transition-colors cursor-pointer text-sm"
+              >
+                {monthsIndex.filter((k) => k !== monthKeyState).length === 0 ? (
+                  <option value={prevMonthKey(monthKeyState)}>Sem histórico</option>
+                ) : (
+                  monthsIndex
+                    .filter((k) => k !== monthKeyState)
+                    .map((k) => (
+                      <option key={k} value={k}>
+                        {monthLabelPt(k)}
+                      </option>
+                    ))
+                )}
+              </select>
+            </div>
+          </div>
+
+          {isHistoryOpen && (
+            <div className="mt-5">
+              {!historyData || !historySummary ? (
+                <div className="text-slate-500 italic text-sm border border-dashed border-slate-700 rounded-xl p-4">
+                  Sem dados salvos para esse mês ainda.
+                </div>
               ) : (
                 <>
-                  <div className="flex flex-col md:flex-row gap-3 items-start md:items-center">
-                    <div className="text-slate-400 text-sm">Selecione o mês:</div>
-                    <select
-                      value={historySelected}
-                      onChange={(e) => setHistorySelected(e.target.value)}
-                      className="bg-slate-950 border border-slate-700 text-white px-3 py-2 rounded-lg focus:outline-none focus:border-cyan-500"
-                    >
-                      {historyMonths.map((m) => (
-                        <option key={m} value={m}>
-                          {m}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  {historyData && (
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
-                      <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-4">
-                        <div className="text-slate-400 text-xs uppercase">Total</div>
-                        <div className="text-4xl font-black text-white">
-                          {(historyData.juanScore || 0) + (historyData.heloisaScore || 0)}
-                        </div>
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                    <div className="bg-slate-800/40 border border-slate-700 rounded-xl p-4">
+                      <div className="text-xs text-slate-500">Total</div>
+                      <div className="text-2xl font-black text-white">{historySummary.total}</div>
+                    </div>
+                    <div className="bg-slate-800/40 border border-slate-700 rounded-xl p-4">
+                      <div className="text-xs text-slate-500">🧊 Juan</div>
+                      <div className="text-2xl font-black text-cyan-300">{historySummary.j}</div>
+                    </div>
+                    <div className="bg-slate-800/40 border border-slate-700 rounded-xl p-4">
+                      <div className="text-xs text-slate-500">🔥 Heloísa</div>
+                      <div className="text-2xl font-black text-purple-300">{historySummary.h}</div>
+                    </div>
+                    <div className="bg-slate-800/40 border border-slate-700 rounded-xl p-4">
+                      <div className="text-xs text-slate-500">Registros</div>
+                      <div className="text-sm text-slate-300 mt-1">
+                        Reuniões: <span className="font-bold text-white">{historySummary.mCount}</span>
                       </div>
-                      <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-4">
-                        <div className="text-slate-400 text-xs uppercase">Juan</div>
-                        <div className="text-4xl font-black text-cyan-400">{historyData.juanScore || 0}</div>
-                      </div>
-                      <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-4">
-                        <div className="text-slate-400 text-xs uppercase">Heloísa</div>
-                        <div className="text-4xl font-black text-purple-400">{historyData.heloisaScore || 0}</div>
+                      <div className="text-sm text-slate-300">
+                        No-shows: <span className="font-bold text-white">{historySummary.lCount}</span>
                       </div>
                     </div>
-                  )}
+                  </div>
+
+                  <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    <div className="bg-slate-800/30 border border-slate-700 rounded-xl p-4">
+                      <div className="font-bold text-white mb-3 flex items-center gap-2">
+                        <CheckCircle className="w-4 h-4 text-green-400" />
+                        Reuniões do mês
+                      </div>
+                      <div className="space-y-2 max-h-[260px] overflow-auto pr-1">
+                        {(historyData.meetingsList || []).length === 0 ? (
+                          <div className="text-slate-500 italic text-sm">Sem reuniões registradas.</div>
+                        ) : (
+                          (historyData.meetingsList || []).map((m) => (
+                            <div key={m.id} className="bg-slate-900/40 border border-slate-700 rounded-lg p-3">
+                              <div className="flex justify-between items-start gap-3">
+                                <div className="min-w-0">
+                                  <div className="font-bold text-white truncate" title={m.opportunity}>
+                                    {m.opportunity}
+                                  </div>
+                                  <div className="text-xs text-slate-400 mt-1 flex items-center gap-2">
+                                    <Calendar className="w-3 h-3" /> {m.date}
+                                  </div>
+                                  <div className="text-xs text-slate-400 flex items-center gap-2">
+                                    <User className="w-3 h-3" /> AE: {m.ae}
+                                  </div>
+                                </div>
+                                <div className={`text-xs font-bold px-2 py-1 rounded bg-slate-950 ${m.sdr === 'juan' ? 'text-cyan-400' : 'text-purple-400'}`}>
+                                  {m.sdr === 'juan' ? 'Juan' : 'Heloísa'}
+                                </div>
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="bg-slate-800/30 border border-slate-700 rounded-xl p-4">
+                      <div className="font-bold text-white mb-3 flex items-center gap-2">
+                        <AlertTriangle className="w-4 h-4 text-yellow-500" />
+                        No-shows do mês
+                      </div>
+                      <div className="space-y-2 max-h-[260px] overflow-auto pr-1">
+                        {(historyData.leads || []).length === 0 ? (
+                          <div className="text-slate-500 italic text-sm">Sem no-shows registrados.</div>
+                        ) : (
+                          (historyData.leads || []).map((l) => (
+                            <div key={l.id} className="bg-slate-900/40 border border-slate-700 rounded-lg p-3">
+                              <div className="flex justify-between items-start gap-3">
+                                <div className="min-w-0">
+                                  <div className="font-bold text-white truncate" title={l.name}>
+                                    {l.name}
+                                  </div>
+                                  <div className="text-xs text-slate-400 mt-1">
+                                    SDR:{' '}
+                                    <span className={l.sdr === 'juan' ? 'text-cyan-400' : 'text-purple-400'}>
+                                      {l.sdr === 'juan' ? 'Juan' : 'Heloísa'}
+                                    </span>
+                                  </div>
+                                </div>
+                                <div className="text-xs font-bold px-2 py-1 rounded bg-slate-950 text-slate-200">{l.noShows}/3</div>
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  </div>
                 </>
               )}
             </div>
@@ -871,20 +990,17 @@ export default function SdrQuest() {
         <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div
             className={`bg-slate-900 border ${
-              schedulingPlayer === "juan"
-                ? "border-cyan-500/50 shadow-[0_0_30px_rgba(6,182,212,0.2)]"
-                : "border-purple-500/50 shadow-[0_0_30px_rgba(168,85,247,0.2)]"
-            } rounded-2xl w-full max-w-md p-6 relative animate-in fade-in zoom-in duration-200`}
+              schedulingPlayer === 'juan'
+                ? 'border-cyan-500/50 shadow-[0_0_30px_rgba(6,182,212,0.2)]'
+                : 'border-purple-500/50 shadow-[0_0_30px_rgba(168,85,247,0.2)]'
+            } rounded-2xl w-full max-w-md p-6 relative`}
           >
-            <button
-              onClick={() => setSchedulingPlayer(null)}
-              className="absolute top-4 right-4 text-slate-500 hover:text-white transition-colors"
-            >
+            <button onClick={() => setSchedulingPlayer(null)} className="absolute top-4 right-4 text-slate-500 hover:text-white transition-colors">
               <X className="w-5 h-5" />
             </button>
 
             <h3 className="text-2xl font-bold text-white mb-6 flex items-center gap-2">
-              <Calendar className={`w-6 h-6 ${schedulingPlayer === "juan" ? "text-cyan-400" : "text-purple-400"}`} />
+              <Calendar className={`w-6 h-6 ${schedulingPlayer === 'juan' ? 'text-cyan-400' : 'text-purple-400'}`} />
               Novo Agendamento
             </h3>
 
@@ -936,7 +1052,7 @@ export default function SdrQuest() {
                   <input
                     type="text"
                     readOnly
-                    value={schedulingPlayer === "juan" ? "Juan" : "Heloísa"}
+                    value={schedulingPlayer === 'juan' ? 'Juan' : 'Heloísa'}
                     className="w-full bg-slate-900 border border-slate-700 text-slate-500 px-4 py-2 rounded-lg cursor-not-allowed"
                   />
                 </div>
@@ -945,7 +1061,7 @@ export default function SdrQuest() {
               <button
                 type="submit"
                 className={`mt-4 w-full py-3 rounded-xl font-bold text-white flex justify-center items-center gap-2 transition-all hover:scale-[1.02] active:scale-[0.98] ${
-                  schedulingPlayer === "juan" ? "bg-cyan-500 hover:bg-cyan-400" : "bg-purple-500 hover:bg-purple-400"
+                  schedulingPlayer === 'juan' ? 'bg-cyan-500 hover:bg-cyan-400' : 'bg-purple-500 hover:bg-purple-400'
                 }`}
               >
                 <CheckCircle className="w-5 h-5" />
@@ -959,43 +1075,52 @@ export default function SdrQuest() {
   );
 }
 
-// --- COMPONENTE DO CARD DO JOGADOR ---
+// =====================
+// PLAYER CARD (sem classes Tailwind dinâmicas)
+// =====================
 function PlayerCard({ name, score, target, onAdd, onRemove, color }) {
-  const isCyan = color === "cyan";
+  const isCyan = color === 'cyan';
+
   const colorClasses = isCyan
     ? {
-        text: "text-cyan-400",
-        btnBg: "bg-cyan-500 hover:bg-cyan-400",
-        shadow: "shadow-[0_0_20px_rgba(6,182,212,0.3)]",
+        text: 'text-cyan-400',
+        borderHover: 'hover:border-cyan-500/30',
+        btnBg: 'bg-cyan-500 hover:bg-cyan-400',
+        shadow: 'shadow-[0_0_20px_rgba(6,182,212,0.3)]',
+        stroke: 'stroke-cyan-500',
+        glow: '#06b6d4',
       }
     : {
-        text: "text-purple-400",
-        btnBg: "bg-purple-500 hover:bg-purple-400",
-        shadow: "shadow-[0_0_20px_rgba(168,85,247,0.3)]",
+        text: 'text-purple-400',
+        borderHover: 'hover:border-purple-500/30',
+        btnBg: 'bg-purple-500 hover:bg-purple-400',
+        shadow: 'shadow-[0_0_20px_rgba(168,85,247,0.3)]',
+        stroke: 'stroke-purple-500',
+        glow: '#a855f7',
       };
 
   const progress = Math.min(100, (score / target) * 100);
 
   return (
-    <div className={`bg-slate-900/80 border border-slate-700/50 rounded-3xl p-6 backdrop-blur-md flex flex-col items-center justify-between transition-all duration-300`}>
+    <div
+      className={`bg-slate-900/80 border border-slate-700/50 rounded-3xl p-6 backdrop-blur-md flex flex-col items-center justify-between transition-all duration-300 ${colorClasses.borderHover}`}
+    >
       <h2 className={`text-2xl font-black ${colorClasses.text} tracking-wider uppercase mb-6`}>{name}</h2>
 
       {/* Círculo de Progresso */}
       <div className="relative w-48 h-48 mb-6 flex items-center justify-center">
         <svg className="w-full h-full transform -rotate-90" viewBox="0 0 100 100">
-          {/* Fundo */}
           <circle cx="50" cy="50" r="45" fill="none" className="stroke-slate-800" strokeWidth="6" />
-          {/* Progresso */}
           <circle
             cx="50"
             cy="50"
             r="45"
             fill="none"
-            className={isCyan ? "stroke-cyan-500 transition-all duration-1000 ease-out" : "stroke-purple-500 transition-all duration-1000 ease-out"}
+            className={`${colorClasses.stroke} transition-all duration-1000 ease-out`}
             strokeWidth="6"
             strokeDasharray="283"
             strokeDashoffset={283 - (283 * progress) / 100}
-            style={{ filter: `drop-shadow(0 0 8px ${isCyan ? "#06b6d4" : "#a855f7"})` }}
+            style={{ filter: `drop-shadow(0 0 8px ${colorClasses.glow})` }}
           />
         </svg>
         <div className="absolute flex flex-col items-center justify-center text-center">
@@ -1025,20 +1150,44 @@ function PlayerCard({ name, score, target, onAdd, onRemove, color }) {
   );
 }
 
-// --- COMPONENTE DE FOGOS DE ARTIFÍCIO (CANVAS) ---
-function FireworksCanvas({ title = "META ATINGIDA!", subtitle = "Excelente trabalho equipe!" }) {
+// =====================
+// FOGOS (CANVAS) - com mensagem
+// =====================
+function FireworksCanvas({ scope = 'team', title = 'META ATINGIDA!', subtitle = '' }) {
   const canvasRef = useRef(null);
+
+  const style = useMemo(() => {
+    if (scope === 'juan') {
+      return {
+        border: 'border-cyan-400',
+        shadow: 'shadow-[0_0_50px_rgba(6,182,212,0.5)]',
+        gradient: 'from-cyan-400 to-cyan-200',
+      };
+    }
+    if (scope === 'heloisa') {
+      return {
+        border: 'border-purple-400',
+        shadow: 'shadow-[0_0_50px_rgba(168,85,247,0.5)]',
+        gradient: 'from-purple-400 to-fuchsia-400',
+      };
+    }
+    return {
+      border: 'border-cyan-400',
+      shadow: 'shadow-[0_0_50px_rgba(6,182,212,0.5)]',
+      gradient: 'from-cyan-400 to-purple-500',
+    };
+  }, [scope]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const ctx = canvas.getContext("2d");
+    const ctx = canvas.getContext('2d');
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
 
     let particles = [];
-    const colors = ["#06b6d4", "#a855f7", "#3b82f6", "#f59e0b", "#ec4899"];
+    const colors = ['#06b6d4', '#a855f7', '#3b82f6', '#f59e0b', '#ec4899'];
 
     function createFirework() {
       const x = Math.random() * canvas.width;
@@ -1062,7 +1211,7 @@ function FireworksCanvas({ title = "META ATINGIDA!", subtitle = "Excelente traba
     let frameCount = 0;
 
     function animate() {
-      ctx.fillStyle = "rgba(2, 6, 23, 0.2)";
+      ctx.fillStyle = 'rgba(2, 6, 23, 0.2)';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
       if (frameCount % 15 === 0) createFirework();
@@ -1094,20 +1243,20 @@ function FireworksCanvas({ title = "META ATINGIDA!", subtitle = "Excelente traba
       canvas.width = window.innerWidth;
       canvas.height = window.innerHeight;
     };
-    window.addEventListener("resize", handleResize);
+    window.addEventListener('resize', handleResize);
 
     return () => {
       cancelAnimationFrame(animationId);
-      window.removeEventListener("resize", handleResize);
+      window.removeEventListener('resize', handleResize);
     };
   }, []);
 
   return (
     <div className="fixed inset-0 z-50 pointer-events-none flex items-center justify-center">
       <canvas ref={canvasRef} className="absolute inset-0" />
-      <div className="relative z-10 bg-slate-900/90 border-2 border-cyan-400 p-8 rounded-3xl text-center shadow-[0_0_50px_rgba(6,182,212,0.5)] animate-bounce">
-        <h2 className="text-4xl font-black text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-purple-500 mb-2">{title}</h2>
-        <p className="text-white text-lg">{subtitle}</p>
+      <div className={`relative z-10 bg-slate-900/90 border-2 ${style.border} p-8 rounded-3xl text-center ${style.shadow} animate-bounce`}>
+        <h2 className={`text-4xl font-black text-transparent bg-clip-text bg-gradient-to-r ${style.gradient} mb-2`}>{title}</h2>
+        <p className="text-white text-lg">{subtitle || 'Excelente trabalho!'}</p>
       </div>
     </div>
   );
