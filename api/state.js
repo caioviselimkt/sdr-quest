@@ -1,6 +1,6 @@
-import { google } from "googleapis";
+const { google } = require("googleapis");
 
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   try {
     if (req.method !== "GET") {
       return res.status(405).json({ error: "Method not allowed" });
@@ -18,7 +18,6 @@ export default async function handler(req, res) {
       });
     }
 
-    // Algumas configs vêm com \\n literal
     privateKey = privateKey.replace(/\\n/g, "\n");
 
     const auth = new google.auth.JWT({
@@ -29,14 +28,14 @@ export default async function handler(req, res) {
 
     const sheets = google.sheets({ version: "v4", auth });
 
-    const monthKey = String(req.query.monthKey || "").trim(); // ex: 2026-03
+    const monthKey = String(req.query.monthKey || "").trim();
     const limitRaw = String(req.query.limit || "5000");
     const limit = Math.max(1, Math.min(20000, parseInt(limitRaw, 10) || 5000));
 
     const range = `${tab}!A:Z`;
     const resp = await sheets.spreadsheets.values.get({ spreadsheetId, range });
 
-    const values = resp?.data?.values || [];
+    const values = (resp && resp.data && resp.data.values) || [];
     if (!Array.isArray(values) || values.length === 0) {
       res.setHeader("Cache-Control", "no-store");
       return res.status(200).json({ events: [] });
@@ -107,4 +106,4 @@ export default async function handler(req, res) {
     res.setHeader("Cache-Control", "no-store");
     return res.status(500).json({ error: "Failed to read sheet" });
   }
-}
+};
