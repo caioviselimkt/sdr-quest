@@ -3,16 +3,38 @@ import { google } from "googleapis";
 function s(v) {
   return String(v === undefined || v === null ? "" : v).trim();
 }
-function lower(v) {
-  return s(v).toLowerCase();
+
+function normStr(v) {
+  return s(v)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, ""); // remove acentos
 }
-function isMonthKey(v) {
-  return /^\d{4}-\d{2}$/.test(s(v));
+
+function normSdr(v) {
+  const t = normStr(v);
+  if (t.includes("juan")) return "juan";
+  if (t.includes("heloisa")) return "heloisa";
+  return t;
 }
+
+function normMonthKey(v) {
+  const raw = s(v);
+  if (!raw) return "";
+  // YYYY-M ou YYYY-MM
+  const m1 = raw.match(/^(\d{4})-(\d{1,2})$/);
+  if (m1) return `${m1[1]}-${String(m1[2]).padStart(2, "0")}`;
+  // MM/YYYY
+  const m2 = raw.match(/^(\d{1,2})\/(\d{4})$/);
+  if (m2) return `${m2[2]}-${String(m2[1]).padStart(2, "0")}`;
+  return raw;
+}
+
 function looksLikeHeader(row) {
-  const r = (row || []).map((c) => lower(c));
+  const r = (row || []).map((c) => normStr(c));
   return r.includes("tipo") || r.includes("meetingid") || r.includes("monthkey") || r.includes("sdr");
 }
+
 function pick(obj, keys) {
   for (const k of keys) {
     if (obj && obj[k] !== undefined && obj[k] !== null && s(obj[k]) !== "") return obj[k];
@@ -26,30 +48,30 @@ function canonicalizeFromObject(obj, fallbackMonthKey) {
     tipo: s(pick(obj, ["tipo", "Tipo", "TIPO"])),
     status: s(pick(obj, ["status", "Status", "STATUS"])),
     meetingId: s(pick(obj, ["meetingId", "meetingID", "MeetingId", "MeetingID", "MEETINGID"])),
-    sdr: lower(pick(obj, ["sdr", "SDR", "Sdr"])),
+    sdr: normSdr(pick(obj, ["sdr", "SDR", "Sdr"])),
     ae: s(pick(obj, ["ae", "AE", "Ae"])),
     oportunidade: s(pick(obj, ["oportunidade", "Oportunidade", "opportunity", "Opportunity"])),
     dataReuniao: s(pick(obj, ["dataReuniao", "DataReuniao", "data", "Data", "date", "Date"])),
     noShowCount: s(pick(obj, ["noShowCount", "NoShowCount", "noshowcount", "NoShow"])),
-    monthKey:
-      s(pick(obj, ["monthKey", "MonthKey", "MONTHKEY", "month key", "Month Key"])) || s(fallbackMonthKey),
+    monthKey: normMonthKey(pick(obj, ["monthKey", "MonthKey", "MONTHKEY", "month key", "Month Key"])) || normMonthKey(fallbackMonthKey),
     observacao: s(pick(obj, ["observacao", "Observacao", "OBSERVACAO", "obs", "Obs"])),
   };
 }
 
-// Quando NÃO tem header no Sheets, assumimos a ordem padrão do /api/log:
+// Quando NÃO tem header, assumimos a ordem padrão do /api/log:
 // [timestamp, tipo, status, meetingId, sdr, ae, oportunidade, dataReuniao, noShowCount, monthKey, observacao]
 function canonicalizeFromArray(row, fallbackMonthKey) {
   const cells = (row || []).map((c) => s(c));
-  const mkIdx = cells.findIndex((c) => isMonthKey(c));
-  const monthKey = (mkIdx >= 0 ? cells[mkIdx] : cells[9]) || s(fallbackMonthKey);
+
+  const mkIdx = cells.findIndex((c) => normMonthKey(c) && /^\d{4}-\d{2}$/.test(normMonthKey(c)));
+  const monthKey = (mkIdx >= 0 ? normMonthKey(cells[mkIdx]) : normMonthKey(cells[9])) || normMonthKey(fallbackMonthKey);
 
   return {
     timestamp: cells[0] || "",
     tipo: cells[1] || "",
     status: cells[2] || "",
     meetingId: cells[3] || "",
-    sdr: lower(cells[4] || ""),
+    sdr: normSdr(cells[4] || ""),
     ae: cells[5] || "",
     oportunidade: cells[6] || "",
     dataReuniao: cells[7] || "",
@@ -95,7 +117,7 @@ export default async function handler(req, res) {
 
     const sheets = google.sheets({ version: "v4", auth });
 
-    const monthKey = s(req.query?.monthKey || req.query?.month || "");
+    const monthKeyParam = normMonthKey(req.query?.monthKey || req.query?.month || "");
     const limitRaw = s(req.query?.limit || "5000");
     let limit = parseInt(limitRaw, 10);
     if (!Number.isFinite(limit) || limit <= 0) limit = 5000;
@@ -136,12 +158,12 @@ export default async function handler(req, res) {
           if (!k) continue;
           obj[k] = row[i] ?? "";
         }
-        ev = canonicalizeFromObject(obj, monthKey);
+        ev = canonicalizeFromObject(obj, monthKeyParam);
       } else {
-        ev = canonicalizeFromArray(row, monthKey);
+        ev = canonicalizeFromArray(row, monthKeyParam);
       }
 
-      if (monthKey && ev.monthKey && ev.monthKey !== monthKey) continue;
+      if (monthKeyParam && ev.monthKey && ev.monthKey !== monthKeyParam) continue;
       if (!s(ev.tipo)) continue;
 
       events.push(ev);

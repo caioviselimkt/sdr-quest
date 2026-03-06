@@ -240,7 +240,7 @@ export default function SdrQuest() {
       if (Date.now() - lastLocalMutationAtRef.current < 2000) return;
 
       try {
-        const res = await fetch(`/api/state?monthKey=${encodeURIComponent(monthKeyState)}&limit=5000`, {
+        const res = await fetch(`/api/state?limit=5000`, {
           method: 'GET',
           headers: { 'Accept': 'application/json' },
           cache: 'no-store',
@@ -254,7 +254,12 @@ export default function SdrQuest() {
         const data = await res.json();
         const events = Array.isArray(data?.events) ? data.events : [];
 
-        const built = buildStateFromEvents(events);
+        // Se remoto vier vazio mas já existe placar local, não sobrescreve (evita zerar no F5 quando filtro falha)
+        if (events.length === 0 && (juanScore > 0 || heloisaScore > 0 || (meetingsList && meetingsList.length))) {
+          return;
+        }
+
+        const built = buildStateFromEvents(events, monthKeyState);
 
         if (!built) return;
 
@@ -493,7 +498,7 @@ const monthKeyForSheets = monthKeyState;
 // Função: reconstrói o estado do mês a partir dos eventos do Sheets
 // (para que todos os computadores vejam o mesmo placar/listas)
 // =====================
-function buildStateFromEvents(rawEvents) {
+function buildStateFromEvents(rawEvents, currentMonthKey) {
   if (!Array.isArray(rawEvents)) {
     return { juanScore: 0, heloisaScore: 0, meetingsList: [], leads: [], signature: '' };
   }
@@ -517,8 +522,41 @@ function buildStateFromEvents(rawEvents) {
     return '';
   };
 
+  const normStr = (v) =>
+    String(v || '')
+      .trim()
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '');
+
+  const normSdr = (v) => {
+    const t = normStr(v);
+    if (t.includes('juan')) return 'juan';
+    if (t.includes('heloisa')) return 'heloisa';
+    return t;
+  };
+
+  const normMonthKey = (v) => {
+    const raw = String(v || '').trim();
+    if (!raw) return '';
+    const m1 = raw.match(/^(\d{4})-(\d{1,2})$/);
+    if (m1) return `${m1[1]}-${String(m1[2]).padStart(2, '0')}`;
+    const m2 = raw.match(/^(\d{1,2})\/(\d{4})$/);
+    if (m2) return `${m2[2]}-${String(m2[1]).padStart(2, '0')}`;
+    return raw;
+  };
+
+  const currentMK = normMonthKey(currentMonthKey || '');
+
+
   for (const ev0 of events) {
-    const tipo = String(pick(ev0, 'tipo', 'Tipo', 'TIPO')).toLowerCase().trim();
+        const tipo = normStr(pick(ev0, 'tipo', 'Tipo', 'TIPO'));
+
+    // filtra eventos de outros meses (quando existir monthKey na linha)
+    const evMonth = normMonthKey(pick(ev0, 'monthKey', 'MonthKey', 'MONTHKEY', 'month key', 'Month Key'));
+    if (currentMK && evMonth && evMonth !== currentMK) {
+      continue;
+    }
 
     if (tipo === 'reuniao' || tipo === 'reunião') {
       const status = String(pick(ev0, 'status', 'Status', 'STATUS')).trim();
@@ -538,7 +576,7 @@ function buildStateFromEvents(rawEvents) {
 
       // agenda/atualiza
       if (!meetingsById.has(meetingId)) {
-        const sdr = String(pick(ev0, 'sdr', 'SDR', 'Sdr')).toLowerCase().trim();
+                const sdr = normSdr(pick(ev0, 'sdr', 'SDR', 'Sdr'));
         const ae = String(pick(ev0, 'ae', 'AE', 'Ae')).trim();
         const opportunity = String(pick(ev0, 'oportunidade', 'Oportunidade', 'opportunity', 'Opportunity')).trim();
         const date = String(pick(ev0, 'dataReuniao', 'DataReuniao', 'data', 'Data')).trim();
@@ -559,7 +597,7 @@ function buildStateFromEvents(rawEvents) {
     }
 
     if (tipo === 'no-show' || tipo === 'noshow' || tipo === 'no show') {
-      const sdr = String(pick(ev0, 'sdr', 'SDR', 'Sdr')).toLowerCase().trim();
+            const sdr = normSdr(pick(ev0, 'sdr', 'SDR', 'Sdr'));
       const name = String(pick(ev0, 'oportunidade', 'Oportunidade', 'lead', 'Lead', 'name', 'Name')).trim();
       const countRaw = pick(ev0, 'noShowCount', 'NoShowCount', 'noshowcount', 'noshow', 'NoShow');
       const count = Number(countRaw) || 0;
