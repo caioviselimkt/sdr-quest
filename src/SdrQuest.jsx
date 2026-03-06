@@ -199,6 +199,11 @@ export default function SdrQuest() {
         // mudou de mês -> zera placar do mês novo
         setMonthKeyState(nowKey);
 
+        // reseta referências do sync (para não trazer números do mês anterior)
+        lastRemoteSignatureRef.current = '';
+        lastLocalMutationAtRef.current = Date.now();
+        pendingMeetingOpsRef.current = [];
+
         setJuanScore(0);
         setHeloisaScore(0);
         setMeetingsList([]);
@@ -270,11 +275,8 @@ export default function SdrQuest() {
         const data = await res.json();
         const events = Array.isArray(data?.events) ? data.events : [];
 
-        // Se remoto vier vazio mas já existe placar local, não sobrescreve (evita zerar no F5 quando o remoto falhar)
-        const snap0 = localSnapshotRef.current || { juanScore: 0, heloisaScore: 0, meetingsLen: 0 };
-        if (events.length === 0 && (snap0.juanScore > 0 || snap0.heloisaScore > 0 || (snap0.meetingsLen || 0) > 0)) {
-          return;
-        }
+        // Se remoto vier vazio, NÃO sobrescreve nada (evita sumir no F5 e evita "voltar" números por falha/aba errada)
+        if (events.length === 0) return;
 
         const built = buildStateFromEvents(events, monthKeyState);
 
@@ -323,11 +325,11 @@ export default function SdrQuest() {
       }
     };
 
-    // primeira sincronização + polling
-    sync();
+    // primeira sincronização + polling (pequeno delay para garantir hidratação do storage)
+    const first = setTimeout(sync, 800);
     const id = setInterval(sync, 3000);
 
-    const onFocus = () => sync();
+const onFocus = () => sync();
     const onVisibility = () => {
       if (document.visibilityState === 'visible') sync();
     };
@@ -337,6 +339,7 @@ export default function SdrQuest() {
 
     return () => {
       cancelled = true;
+      clearTimeout(first);
       clearInterval(id);
       window.removeEventListener('focus', onFocus);
       document.removeEventListener('visibilitychange', onVisibility);
@@ -523,21 +526,17 @@ const monthKeyForSheets = monthKeyState;
 // (para que todos os computadores vejam o mesmo placar/listas)
 // =====================
 function buildStateFromEvents(rawEvents, currentMonthKey) {
+  // Reconstrói estado DO MÊS atual a partir do log do Sheets.
+  // Regras importantes:
+  // - Filtra por monthKey (YYYY-MM). Se monthKey estiver vazio, tenta inferir do Timestamp.
+  // - Respeita evento "reset" no mês: ignora tudo o que veio antes do reset.
+  // - Reuniões: tipo "reuniao" (ou "reunião"). Se status contém "[deletado]" remove.
+  // - No-show: atualiza tracker; no 3º (>=3) remove 1 reunião do SDR (preferindo a do mesmo lead).
   if (!Array.isArray(rawEvents)) {
     return { juanScore: 0, heloisaScore: 0, meetingsList: [], leads: [], signature: '' };
   }
 
-  // normaliza/ordena (assumimos que a planilha está em ordem cronológica de append)
   const events = rawEvents.filter(Boolean);
-
-  // assinatura simples (se mudou, atualiza)
-  const last = events[events.length - 1] || {};
-  const signature = `${events.length}|${String(last.tipo || last.Tipo || '')}|${String(last.status || last.Status || '')}|${String(last.meetingId || last.meetingID || last.MeetingId || '')}|${String(last.oportunidade || last.Oportunidade || '')}|${String(last.noShowCount || last.NoShowCount || '')}|${String(last.monthKey || last.MonthKey || '')}|${String(last.observacao || last.Observacao || '')}`;
-
-  const meetings = [];
-  const meetingsById = new Map();
-
-  const leadsMap = new Map(); // key = sdr::nameLower -> lead
 
   const pick = (obj, ...keys) => {
     for (const k of keys) {
@@ -565,26 +564,90 @@ function buildStateFromEvents(rawEvents, currentMonthKey) {
     if (!raw) return '';
     const m1 = raw.match(/^(\d{4})-(\d{1,2})$/);
     if (m1) return `${m1[1]}-${String(m1[2]).padStart(2, '0')}`;
-    const m2 = raw.match(/^(\d{1,2})\/(\d{4})$/);
+    const m2 = raw.match(/^(\d{1,2})\/(\d{4})$/); // MM/YYYY
     if (m2) return `${m2[2]}-${String(m2[1]).padStart(2, '0')}`;
     return raw;
   };
 
+  const monthKeyFromTimestamp = (ts) => {
+    const raw = String(ts || '').trim();
+    if (!raw) return '';
+
+    // epoch ms / s
+    if (/^\d{10,13}$/.test(raw)) {
+      const n = Number(raw);
+      const ms = raw.length === 10 ? n * 1000 : n;
+      const d = new Date(ms);
+      if (!Number.isNaN(d.getTime())) return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    }
+
+    // dd/mm/yyyy
+    const br = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    if (br) {
+      const dd = Number(br[1]);
+      const mm = Number(br[2]);
+      const yy = Number(br[3]);
+      if (yy >= 2000 && mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+        return `${yy}-${String(mm).padStart(2, '0')}`;
+      }
+    }
+
+    // tenta parse nativo (ISO etc)
+    const d = new Date(raw);
+    if (!Number.isNaN(d.getTime())) {
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    }
+
+    return '';
+  };
+
   const currentMK = normMonthKey(currentMonthKey || '');
 
+  // Assinatura simples (evita re-aplicar se nada mudou)
+  const last = events[events.length - 1] || {};
+  const signature = `${currentMK}|${events.length}|${String(pick(last, 'tipo', 'Tipo', 'TIPO'))}|${String(
+    pick(last, 'status', 'Status', 'STATUS')
+  )}|${String(pick(last, 'meetingId', 'meetingID', 'MeetingId', 'MeetingID', 'MEETINGID', 'Meetingld', 'meetingld'))}|${String(
+    pick(last, 'oportunidade', 'Oportunidade', 'opportunity', 'Opportunity')
+  )}|${String(pick(last, 'noShowCount', 'NoShowCount', 'noshowcount', 'NoShow'))}|${String(
+    pick(last, 'monthKey', 'MonthKey', 'MONTHKEY', 'month key', 'Month Key')
+  )}|${String(pick(last, 'observacao', 'Observacao', 'OBSERVACAO', 'obs', 'Obs'))}`;
+
+  let meetings = [];
+  const meetingsById = new Map();
+  const leadsMap = new Map(); // key = sdr::nameLower -> lead
+
+  const clearMonthState = () => {
+    meetings = [];
+    meetingsById.clear();
+    leadsMap.clear();
+  };
 
   for (const ev0 of events) {
-        const tipo = normStr(pick(ev0, 'tipo', 'Tipo', 'TIPO'));
+    const tipo = normStr(pick(ev0, 'tipo', 'Tipo', 'TIPO'));
 
-    // filtra eventos de outros meses (quando existir monthKey na linha)
-    const evMonth = normMonthKey(pick(ev0, 'monthKey', 'MonthKey', 'MONTHKEY', 'month key', 'Month Key'));
-    if (currentMK && evMonth && evMonth !== currentMK) {
+    // resolve monthKey do evento (prioridade: coluna MonthKey; fallback: Timestamp)
+    const evMonthRaw = pick(ev0, 'monthKey', 'MonthKey', 'MONTHKEY', 'month key', 'Month Key');
+    const tsRaw = pick(ev0, 'timestamp', 'Timestamp', 'TIME', 'Time', 'data', 'Data');
+    const evMonth = normMonthKey(evMonthRaw) || monthKeyFromTimestamp(tsRaw);
+
+    // filtra mês
+    if (currentMK) {
+      // se eu conseguir inferir e não bate, ignora
+      if (evMonth && evMonth !== currentMK) continue;
+      // se não consigo inferir o mês, ignora (evita "voltar número do mês passado")
+      if (!evMonth) continue;
+    }
+
+    // reset manual do mês (não apaga log, mas zera estado a partir daqui)
+    if (tipo === 'reset' || tipo === 'reset_mes' || tipo === 'reset mes' || tipo === 'resetar' || tipo === 'resetarmês' || tipo === 'resetarmes') {
+      clearMonthState();
       continue;
     }
 
     if (tipo === 'reuniao' || tipo === 'reunião') {
       const status = String(pick(ev0, 'status', 'Status', 'STATUS')).trim();
-      const meetingIdRaw = pick(ev0, 'meetingId', 'meetingID', 'MeetingId', 'MEETINGID');
+      const meetingIdRaw = pick(ev0, 'meetingId', 'meetingID', 'MeetingId', 'MeetingID', 'MEETINGID', 'Meetingld', 'meetingld');
       const meetingId = String(meetingIdRaw || '').trim();
       if (!meetingId) continue;
 
@@ -598,9 +661,9 @@ function buildStateFromEvents(rawEvents, currentMonthKey) {
         continue;
       }
 
-      // agenda/atualiza
+      // agenda (se ainda não existe)
       if (!meetingsById.has(meetingId)) {
-                const sdr = normSdr(pick(ev0, 'sdr', 'SDR', 'Sdr'));
+        const sdr = normSdr(pick(ev0, 'sdr', 'SDR', 'Sdr'));
         const ae = String(pick(ev0, 'ae', 'AE', 'Ae')).trim();
         const opportunity = String(pick(ev0, 'oportunidade', 'Oportunidade', 'opportunity', 'Opportunity')).trim();
         const date = String(pick(ev0, 'dataReuniao', 'DataReuniao', 'data', 'Data')).trim();
@@ -621,7 +684,7 @@ function buildStateFromEvents(rawEvents, currentMonthKey) {
     }
 
     if (tipo === 'no-show' || tipo === 'noshow' || tipo === 'no show') {
-            const sdr = normSdr(pick(ev0, 'sdr', 'SDR', 'Sdr'));
+      const sdr = normSdr(pick(ev0, 'sdr', 'SDR', 'Sdr'));
       const name = String(pick(ev0, 'oportunidade', 'Oportunidade', 'lead', 'Lead', 'name', 'Name')).trim();
       const countRaw = pick(ev0, 'noShowCount', 'NoShowCount', 'noshowcount', 'noshow', 'NoShow');
       const count = Number(countRaw) || 0;
@@ -632,7 +695,7 @@ function buildStateFromEvents(rawEvents, currentMonthKey) {
       prev.noShows = Math.max(prev.noShows, count);
       leadsMap.set(key, prev);
 
-      // 3º no-show (ou mais): penaliza (remove 1 reunião do SDR)
+      // 3º no-show (ou mais): remove 1 reunião do SDR
       if (count >= 3) {
         const nameLower = name.toLowerCase();
 
@@ -655,7 +718,6 @@ function buildStateFromEvents(rawEvents, currentMonthKey) {
   const heloisaScore = meetings.filter((m) => m.sdr === 'heloisa').length;
 
   const leads = Array.from(leadsMap.values()).sort((a, b) => {
-    // mais no-shows primeiro, depois nome
     if (b.noShows !== a.noShows) return b.noShows - a.noShows;
     return String(a.name).localeCompare(String(b.name));
   });
@@ -868,6 +930,12 @@ logEvent({
   const removeLead = (id) => setLeads(leads.filter((l) => l.id !== id));
 
   const resetCurrentMonth = () => {
+    // Reset manual precisa ser compartilhado entre PCs, então registramos no Sheets como um evento "reset".
+    lastLocalMutationAtRef.current = Date.now();
+
+    // limpa ações pendentes para não bloquear sync
+    pendingMeetingOpsRef.current = [];
+
     setJuanScore(0);
     setHeloisaScore(0);
     setMeetingsList([]);
@@ -879,6 +947,23 @@ logEvent({
     lastCelebratedHeloTargetRef.current = 0;
     celebrationQueueRef.current = [];
     setCelebrationPayload(null);
+
+    // registra no Sheets (para não "voltar" após o próximo sync)
+    logEvent({
+      tipo: "reset",
+      status: "",
+      meetingId: "",
+      sdr: "sistema",
+      ae: "",
+      oportunidade: "",
+      dataReuniao: "",
+      noShowCount: "",
+      monthKey: monthKeyForSheets,
+      observacao: "reset manual do mês",
+    });
+
+    // força o próximo sync a aplicar (assinatura muda)
+    lastRemoteSignatureRef.current = "";
   };
 
   // =====================
