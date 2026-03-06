@@ -1,9 +1,8 @@
-module.exports = (req, res) => {
+export default function handler(req, res) {
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.setHeader("Cache-Control", "no-store");
-  res.statusCode = 200;
 
-  res.end(
+  res.status(200).send(
     JSON.stringify({
       ok: true,
       route: "/api/state",
@@ -17,4 +16,4 @@ module.exports = (req, res) => {
       },
     })
   );
-};
+}
