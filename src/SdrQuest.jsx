@@ -226,7 +226,97 @@ export default function SdrQuest() {
   }, [monthKeyState]);
 
   // =====================
+  // SYNC AO VIVO (Sheets -> todos os usuários)
+  // =====================
+  const lastRemoteSignatureRef = useRef('');
+  const lastLocalMutationAtRef = useRef(0);
+  const pendingMeetingOpsRef = useRef([]); // [{kind:'add'|'del', id, at}]
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const sync = async () => {
+      // evita sobrescrever uma ação local muito recente (dá tempo do Sheets atualizar)
+      if (Date.now() - lastLocalMutationAtRef.current < 2000) return;
+
+      try {
+        const res = await fetch(`/api/state?monthKey=${encodeURIComponent(monthKeyState)}&limit=5000`, {
+          method: 'GET',
+          headers: { 'Accept': 'application/json' },
+          cache: 'no-store',
+        });
+
+        if (!res.ok) {
+          // se o endpoint ainda não existir, só não faz nada (não quebra o app)
+          return;
+        }
+
+        const data = await res.json();
+        const events = Array.isArray(data?.events) ? data.events : [];
+
+        const built = buildStateFromEvents(events);
+
+        if (!built) return;
+
+        // --- Guard: não sobrescreve ações locais pendentes (evita "sumir" reunião por delay do Sheets)
+        const now = Date.now();
+        const ops = Array.isArray(pendingMeetingOpsRef.current) ? pendingMeetingOpsRef.current : [];
+        const freshOps = ops.filter((op) => now - (op?.at || 0) < 20000); // 20s janela
+        pendingMeetingOpsRef.current = freshOps;
+
+        const remoteIds = new Set((built.meetingsList || []).map((m) => String(m.id)));
+        const hasPendingMismatch = freshOps.some((op) => {
+          if (!op || !op.id) return false;
+          if (op.kind === 'add') return !remoteIds.has(String(op.id));
+          if (op.kind === 'del') return remoteIds.has(String(op.id));
+          return false;
+        });
+
+        // se o remoto ainda não refletiu as ações pendentes, não aplica (aguarda próximo polling)
+        if (hasPendingMismatch) return;
+
+        // se remoto já refletiu, pode limpar ops pendentes (evita crescer)
+        pendingMeetingOpsRef.current = [];
+
+        if (built.signature && built.signature === lastRemoteSignatureRef.current) return;
+
+        lastRemoteSignatureRef.current = built.signature || '';
+
+        if (cancelled) return;
+
+        // aplica state remoto (somente quando mudou)
+        setJuanScore(built.juanScore);
+        setHeloisaScore(built.heloisaScore);
+        setMeetingsList(built.meetingsList);
+      } catch (e) {
+        // silencioso para não atrapalhar operação (erro de rede, etc.)
+        // console.warn('Falha no sync ao vivo:', e);
+      }
+    };
+
+    // primeira sincronização + polling
+    sync();
+    const id = setInterval(sync, 3000);
+
+    const onFocus = () => sync();
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') sync();
+    };
+
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibility);
+
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [monthKeyState]);
+
+  // =====================
   // CÁLCULOS (EQUIPE)
+  // =====================
   // =====================
   const totalScore = juanScore + heloisaScore;
 
@@ -397,12 +487,129 @@ const logEvent = async (payload) => {
 };
 
 // ✅ mês (YYYY-MM) somente para registro no Sheets
-const monthKeyForSheets = new Date().toISOString().slice(0, 7);
+const monthKeyForSheets = monthKeyState;
+
+// =====================
+// Função: reconstrói o estado do mês a partir dos eventos do Sheets
+// (para que todos os computadores vejam o mesmo placar/listas)
+// =====================
+function buildStateFromEvents(rawEvents) {
+  if (!Array.isArray(rawEvents)) {
+    return { juanScore: 0, heloisaScore: 0, meetingsList: [], leads: [], signature: '' };
+  }
+
+  // normaliza/ordena (assumimos que a planilha está em ordem cronológica de append)
+  const events = rawEvents.filter(Boolean);
+
+  // assinatura simples (se mudou, atualiza)
+  const last = events[events.length - 1] || {};
+  const signature = `${events.length}|${String(last.tipo || last.Tipo || '')}|${String(last.status || last.Status || '')}|${String(last.meetingId || last.meetingID || last.MeetingId || '')}|${String(last.oportunidade || last.Oportunidade || '')}|${String(last.noShowCount || last.NoShowCount || '')}|${String(last.monthKey || last.MonthKey || '')}|${String(last.observacao || last.Observacao || '')}`;
+
+  const meetings = [];
+  const meetingsById = new Map();
+
+  const leadsMap = new Map(); // key = sdr::nameLower -> lead
+
+  const pick = (obj, ...keys) => {
+    for (const k of keys) {
+      if (obj && obj[k] !== undefined && obj[k] !== null && obj[k] !== '') return obj[k];
+    }
+    return '';
+  };
+
+  for (const ev0 of events) {
+    const tipo = String(pick(ev0, 'tipo', 'Tipo', 'TIPO')).toLowerCase().trim();
+
+    if (tipo === 'reuniao' || tipo === 'reunião') {
+      const status = String(pick(ev0, 'status', 'Status', 'STATUS')).trim();
+      const meetingIdRaw = pick(ev0, 'meetingId', 'meetingID', 'MeetingId', 'MEETINGID');
+      const meetingId = String(meetingIdRaw || '').trim();
+      if (!meetingId) continue;
+
+      if (status.includes('[deletado]')) {
+        // remove pelo ID
+        const idx = meetings.findIndex((m) => String(m.id) === meetingId);
+        if (idx !== -1) {
+          meetings.splice(idx, 1);
+        }
+        meetingsById.delete(meetingId);
+        continue;
+      }
+
+      // agenda/atualiza
+      if (!meetingsById.has(meetingId)) {
+        const sdr = String(pick(ev0, 'sdr', 'SDR', 'Sdr')).toLowerCase().trim();
+        const ae = String(pick(ev0, 'ae', 'AE', 'Ae')).trim();
+        const opportunity = String(pick(ev0, 'oportunidade', 'Oportunidade', 'opportunity', 'Opportunity')).trim();
+        const date = String(pick(ev0, 'dataReuniao', 'DataReuniao', 'data', 'Data')).trim();
+
+        const m = {
+          id: Number.isFinite(Number(meetingId)) ? Number(meetingId) : meetingId,
+          sdr,
+          ae,
+          opportunity,
+          date,
+        };
+
+        // no app, sempre entra no topo
+        meetings.unshift(m);
+        meetingsById.set(meetingId, m);
+      }
+      continue;
+    }
+
+    if (tipo === 'no-show' || tipo === 'noshow' || tipo === 'no show') {
+      const sdr = String(pick(ev0, 'sdr', 'SDR', 'Sdr')).toLowerCase().trim();
+      const name = String(pick(ev0, 'oportunidade', 'Oportunidade', 'lead', 'Lead', 'name', 'Name')).trim();
+      const countRaw = pick(ev0, 'noShowCount', 'NoShowCount', 'noshowcount', 'noshow', 'NoShow');
+      const count = Number(countRaw) || 0;
+      if (!sdr || !name || !count) continue;
+
+      const key = `${sdr}::${name.toLowerCase()}`;
+      const prev = leadsMap.get(key) || { id: key, name, sdr, noShows: 0 };
+      prev.noShows = Math.max(prev.noShows, count);
+      leadsMap.set(key, prev);
+
+      // 3º no-show (ou mais): penaliza (remove 1 reunião do SDR)
+      if (count >= 3) {
+        const nameLower = name.toLowerCase();
+
+        let removeIdx = meetings.findIndex(
+          (m) => m.sdr === sdr && String(m.opportunity || '').toLowerCase() === nameLower
+        );
+        if (removeIdx === -1) removeIdx = meetings.findIndex((m) => m.sdr === sdr);
+
+        if (removeIdx !== -1) {
+          const removed = meetings[removeIdx];
+          meetings.splice(removeIdx, 1);
+          meetingsById.delete(String(removed.id));
+        }
+      }
+      continue;
+    }
+  }
+
+  const juanScore = meetings.filter((m) => m.sdr === 'juan').length;
+  const heloisaScore = meetings.filter((m) => m.sdr === 'heloisa').length;
+
+  const leads = Array.from(leadsMap.values()).sort((a, b) => {
+    // mais no-shows primeiro, depois nome
+    if (b.noShows !== a.noShows) return b.noShows - a.noShows;
+    return String(a.name).localeCompare(String(b.name));
+  });
+
+  return { juanScore, heloisaScore, meetingsList: meetings, leads, signature };
+}
+
   const handleScheduleSubmit = (e) => {
     e.preventDefault();
+    lastLocalMutationAtRef.current = Date.now();
     if (!meetingForm.date || !meetingForm.opportunity) return;
 
     const newMeeting = { ...meetingForm, sdr: schedulingPlayer, id: Date.now() };
+
+    // marca como pendente até o Sheets refletir (para não sumir no sync)
+    pendingMeetingOpsRef.current = [...(pendingMeetingOpsRef.current || []), { kind: 'add', id: String(newMeeting.id), at: Date.now() }];
 
     // adiciona no topo (evita bug de state)
     setMeetingsList((prev) => [newMeeting, ...prev]);
@@ -429,12 +636,16 @@ const monthKeyForSheets = new Date().toISOString().slice(0, 7);
   };
 
   const removeMeeting = (player) => {
+    lastLocalMutationAtRef.current = Date.now();
     if (player === 'juan' && juanScore > 0) {
       setJuanScore((s) => s - 1);
       setMeetingsList((prev) => {
   const index = prev.findIndex((m) => m.sdr === "juan");
   if (index !== -1) {
     const removed = prev[index];
+
+    // marca deleção como pendente até o Sheets refletir
+    pendingMeetingOpsRef.current = [...(pendingMeetingOpsRef.current || []), { kind: 'del', id: String(removed.id), at: Date.now() }];
 
     // log no Sheets (deletado)
     logEvent({
@@ -465,6 +676,9 @@ const monthKeyForSheets = new Date().toISOString().slice(0, 7);
   if (index !== -1) {
     const removed = prev[index];
 
+    // marca deleção como pendente até o Sheets refletir
+    pendingMeetingOpsRef.current = [...(pendingMeetingOpsRef.current || []), { kind: 'del', id: String(removed.id), at: Date.now() }];
+
     // log no Sheets (deletado)
     logEvent({
       tipo: "reuniao",
@@ -490,6 +704,7 @@ const monthKeyForSheets = new Date().toISOString().slice(0, 7);
 
   // Remove um agendamento específico pelo ID (botão X do card)
   const removeMeetingById = (meetingId, reason = "clicou X") => {
+    lastLocalMutationAtRef.current = Date.now();
     setMeetingsList((prev) => {
       const index = prev.findIndex((m) => String(m.id) === String(meetingId));
       if (index === -1) return prev;
@@ -497,6 +712,9 @@ const monthKeyForSheets = new Date().toISOString().slice(0, 7);
       const removed = prev[index];
 
       // ajusta placar do SDR correto
+
+      // marca deleção como pendente até o Sheets refletir
+      pendingMeetingOpsRef.current = [...(pendingMeetingOpsRef.current || []), { kind: 'del', id: String(removed.id), at: Date.now() }];
       if (removed.sdr === "juan") setJuanScore((s) => Math.max(0, s - 1));
       if (removed.sdr === "heloisa") setHeloisaScore((s) => Math.max(0, s - 1));
 
@@ -523,6 +741,7 @@ const monthKeyForSheets = new Date().toISOString().slice(0, 7);
 
   const handleAddNoShow = (e) => {
     e.preventDefault();
+    lastLocalMutationAtRef.current = Date.now();
     if (!newLeadName.trim()) return;
 
     const existingLeadIndex = leads.findIndex(
@@ -563,6 +782,11 @@ logEvent({
           if (index === -1) index = prev.findIndex((m) => m.sdr === penalizedSdr);
 
           if (index !== -1) {
+            const removedMeeting = prev[index];
+
+            // marca deleção (no-show 3) como pendente até o Sheets refletir
+            pendingMeetingOpsRef.current = [...(pendingMeetingOpsRef.current || []), { kind: 'del', id: String(removedMeeting.id), at: Date.now() }];
+
             const newList = [...prev];
             newList.splice(index, 1);
             return newList;

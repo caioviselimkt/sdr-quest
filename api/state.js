@@ -1,144 +1,110 @@
 import { google } from "googleapis";
 
-function getEnv(name) {
-  const v = process.env[name];
-  if (!v) throw new Error(`Missing env var: ${name}`);
-  return v;
-}
-
-function authClient() {
-  const clientEmail = getEnv("GOOGLE_CLIENT_EMAIL");
-  const privateKey = getEnv("GOOGLE_PRIVATE_KEY").replace(/\\n/g, "\n");
-  return new google.auth.JWT({
-    email: clientEmail,
-    key: privateKey,
-    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-  });
-}
-
-function normalizeCompany(s = "") {
-  return String(s).trim().replace(/\s+/g, " ");
-}
-
-function safeNum(v) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : 0;
-}
-
 export default async function handler(req, res) {
   try {
     if (req.method !== "GET") {
-      return res.status(405).json({ ok: false, error: "Method not allowed. Use GET" });
+      return res.status(405).json({ error: "Method not allowed" });
     }
 
-    const monthKey = String(req.query.month || "").trim();
-    if (!monthKey) {
-      return res.status(400).json({ ok: false, error: "Missing ?month=YYYY-MM" });
-    }
+    const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+    const clientEmail = process.env.GOOGLE_CLIENT_EMAIL;
+    let privateKey = process.env.GOOGLE_PRIVATE_KEY;
+    const tab = process.env.GOOGLE_SHEET_TAB;
 
-    const sheetId = getEnv("GOOGLE_SHEET_ID");
-    const tab = getEnv("GOOGLE_SHEET_TAB"); // sua aba de eventos
-
-    const auth = authClient();
-    const sheets = google.sheets({ version: "v4", auth });
-
-    // Lê tudo da aba (assumindo 1ª linha = cabeçalho)
-    const r = await sheets.spreadsheets.values.get({
-      spreadsheetId: sheetId,
-      range: `${tab}!A:Z`,
-    });
-
-    const values = r.data.values || [];
-    if (values.length < 2) {
-      return res.status(200).json({
-        ok: true,
-        monthKey,
-        juanScore: 0,
-        heloisaScore: 0,
-        meetingsList: [],
-        leads: [],
+    if (!spreadsheetId || !clientEmail || !privateKey || !tab) {
+      return res.status(500).json({
+        error:
+          "Missing env vars. Required: GOOGLE_SHEET_ID, GOOGLE_CLIENT_EMAIL, GOOGLE_PRIVATE_KEY, GOOGLE_SHEET_TAB",
       });
     }
 
-    const header = values[0].map((h) => String(h || "").trim());
-    const rows = values.slice(1);
+    // Algumas configs vêm com \\n literal
+    privateKey = privateKey.replace(/\\n/g, "\n");
 
-    const col = (name) => header.indexOf(name);
+    const auth = new google.auth.JWT({
+      email: clientEmail,
+      key: privateKey,
+      scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
+    });
 
-    // Esperado no Sheets (seu /api/log deve escrever isso):
-    // monthKey, meetingId, tipo, status, sdr, ae, oportunidade, dataReuniao, noShowCount
-    const iMonth = col("monthKey");
-    const iTipo = col("tipo");
-    const iStatus = col("status");
-    const iSdr = col("sdr");
-    const iAe = col("ae");
-    const iOpp = col("oportunidade");
-    const iDate = col("dataReuniao");
-    const iNoShow = col("noShowCount");
-    const iMeetingId = col("meetingId");
+    const sheets = google.sheets({ version: "v4", auth });
 
-    const meetingsMap = new Map(); // key = meetingId (mês:empresa)
-    const leadsMap = new Map();    // key = meetingId (mês:empresa)
+    const monthKey = String(req.query.monthKey || "").trim(); // ex: 2026-03
+    const limitRaw = String(req.query.limit || "5000");
+    const limit = Math.max(1, Math.min(20000, parseInt(limitRaw, 10) || 5000));
 
-    for (const row of rows) {
-      const rowMonth = String(row[iMonth] || "").trim();
-      if (rowMonth !== monthKey) continue;
+    const range = `${tab}!A:Z`;
+    const resp = await sheets.spreadsheets.values.get({ spreadsheetId, range });
 
-      const tipo = String(row[iTipo] || "").trim();
-      const status = String(row[iStatus] || "").trim();
-      const sdr = String(row[iSdr] || "").trim();
-      const ae = String(row[iAe] || "").trim();
-      const oportunidade = normalizeCompany(row[iOpp] || "");
-      const dataReuniao = String(row[iDate] || "").trim();
-      const noShowCount = safeNum(row[iNoShow] || 0);
-      const meetingId = String(row[iMeetingId] || "").trim();
-
-      if (!meetingId || !oportunidade) continue;
-
-      // Reuniões ativas = tipo=reuniao e não deletado
-      if (tipo === "reuniao") {
-        if (status === "[deletado]") {
-          meetingsMap.delete(meetingId);
-        } else {
-          meetingsMap.set(meetingId, {
-            id: meetingId, // id estável pra UI
-            meetingId,
-            sdr,
-            ae,
-            opportunity: oportunidade,
-            date: dataReuniao,
-          });
-        }
-      }
-
-      // No-shows (mostra no radar) = noShowCount > 0
-      if (noShowCount > 0) {
-        leadsMap.set(meetingId, {
-          id: meetingId,
-          name: oportunidade,
-          sdr: sdr || "juan",
-          noShows: noShowCount,
-        });
-      }
+    const values = resp?.data?.values || [];
+    if (!Array.isArray(values) || values.length === 0) {
+      res.setHeader("Cache-Control", "no-store");
+      return res.status(200).json({ events: [] });
     }
 
-    const meetingsList = Array.from(meetingsMap.values());
-    const leads = Array.from(leadsMap.values());
+    const looksLikeHeader = (row) => {
+      const r = (row || []).map((c) => String(c || "").toLowerCase().trim());
+      return r.includes("tipo") || r.includes("meetingid") || r.includes("monthkey");
+    };
 
-    // Scores a partir das reuniões ativas
-    const juanScore = meetingsList.filter((m) => m.sdr === "juan").length;
-    const heloisaScore = meetingsList.filter((m) => m.sdr === "heloisa").length;
+    const DEFAULT_HEADER = [
+      "timestamp",
+      "tipo",
+      "status",
+      "meetingId",
+      "sdr",
+      "ae",
+      "oportunidade",
+      "dataReuniao",
+      "noShowCount",
+      "monthKey",
+      "observacao",
+    ];
 
-    return res.status(200).json({
-      ok: true,
-      monthKey,
-      juanScore,
-      heloisaScore,
-      meetingsList,
-      leads,
-    });
-  } catch (e) {
-    console.error(e);
-    return res.status(500).json({ ok: false, error: "Internal error", details: String(e?.message || e) });
+    let header = values[0] || [];
+    let rows = values.slice(1);
+
+    if (!looksLikeHeader(header)) {
+      header = DEFAULT_HEADER;
+      rows = values;
+    }
+
+    const events = [];
+    for (const row of rows) {
+      if (!row || row.length === 0) continue;
+
+      const obj = {};
+      for (let i = 0; i < header.length; i++) {
+        const key = String(header[i] || "").trim();
+        if (!key) continue;
+        obj[key] = row[i] ?? "";
+      }
+
+      const tipo = obj.tipo ?? obj.Tipo ?? obj.TIPO ?? "";
+      const mk =
+        obj.monthKey ??
+        obj.MonthKey ??
+        obj.MONTHKEY ??
+        obj["month key"] ??
+        obj["Month Key"] ??
+        "";
+
+      if (monthKey) {
+        const mkNorm = String(mk || "").trim();
+        if (mkNorm !== monthKey) continue;
+      }
+
+      if (!String(tipo || "").trim()) continue;
+
+      events.push(obj);
+    }
+
+    const sliced = events.length > limit ? events.slice(events.length - limit) : events;
+
+    res.setHeader("Cache-Control", "no-store");
+    return res.status(200).json({ events: sliced });
+  } catch (err) {
+    res.setHeader("Cache-Control", "no-store");
+    return res.status(500).json({ error: "Failed to read sheet" });
   }
 }
