@@ -232,6 +232,22 @@ export default function SdrQuest() {
   const lastLocalMutationAtRef = useRef(0);
   const pendingMeetingOpsRef = useRef([]); // [{kind:'add'|'del', id, at}]
 
+  // snapshot do state local (evita closures antigas no polling)
+  const localSnapshotRef = useRef({
+    juanScore: initialSaved.juanScore ?? 0,
+    heloisaScore: initialSaved.heloisaScore ?? 0,
+    meetingsLen: (initialSaved.meetingsList || []).length,
+  });
+
+  useEffect(() => {
+    localSnapshotRef.current = {
+      juanScore,
+      heloisaScore,
+      meetingsLen: (meetingsList || []).length,
+    };
+  }, [juanScore, heloisaScore, meetingsList]);
+
+
   useEffect(() => {
     let cancelled = false;
 
@@ -254,14 +270,22 @@ export default function SdrQuest() {
         const data = await res.json();
         const events = Array.isArray(data?.events) ? data.events : [];
 
-        // Se remoto vier vazio mas já existe placar local, não sobrescreve (evita zerar no F5 quando filtro falha)
-        if (events.length === 0 && (juanScore > 0 || heloisaScore > 0 || (meetingsList && meetingsList.length))) {
+        // Se remoto vier vazio mas já existe placar local, não sobrescreve (evita zerar no F5 quando o remoto falhar)
+        const snap0 = localSnapshotRef.current || { juanScore: 0, heloisaScore: 0, meetingsLen: 0 };
+        if (events.length === 0 && (snap0.juanScore > 0 || snap0.heloisaScore > 0 || (snap0.meetingsLen || 0) > 0)) {
           return;
         }
 
         const built = buildStateFromEvents(events, monthKeyState);
 
         if (!built) return;
+
+        // Guard extra: se veio evento remoto mas o parse gerou lista vazia enquanto local tem dados,
+        // não sobrescreve (evita sumir no F5 por mismatch de colunas).
+        const snap1 = localSnapshotRef.current || { meetingsLen: 0 };
+        if (events.length > 0 && (built.meetingsList || []).length === 0 && (snap1.meetingsLen || 0) > 0) {
+          return;
+        }
 
         // --- Guard: não sobrescreve ações locais pendentes (evita "sumir" reunião por delay do Sheets)
         const now = Date.now();
