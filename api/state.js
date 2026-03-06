@@ -1,54 +1,60 @@
 import { google } from "googleapis";
 
-// =====================
-// Helpers
-// =====================
+/**
+ * api/state.js (ESM) - AUTOTAB
+ * - Se a aba configurada (GOOGLE_SHEET_TAB) não tiver linhas, procura automaticamente outra aba com eventos.
+ * - Retorna eventos canônicos para o front (tipo/status/meetingId/sdr/monthKey etc).
+ * - ?debug=1 adiciona diagnóstico (não expõe segredo).
+ */
+
 function s(v) {
   return String(v === undefined || v === null ? "" : v).trim();
 }
-function norm(v) {
-  return s(v)
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, ""); // remove acentos
+function lower(v) {
+  return s(v).toLowerCase();
 }
 function normKey(v) {
-  // normaliza header: remove espaços/pontuação
-  return norm(v).replace(/[^a-z0-9]/g, "");
+  // normaliza header: remove espaços e caracteres especiais simples
+  return lower(v).replace(/\s+/g, "").replace(/[^a-z0-9_]/g, "");
+}
+function stripAccents(v) {
+  return s(v)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+function normSdr(v) {
+  const x = stripAccents(v).toLowerCase().trim();
+  if (x === "heloisa" || x === "heloísa") return "heloisa";
+  if (x === "juan") return "juan";
+  return x;
+}
+function normMonthKey(v) {
+  const x = s(v);
+  // aceita 2026-3 e converte pra 2026-03
+  const m = x.match(/^(\d{4})-(\d{1,2})$/);
+  if (m) {
+    const mm = String(m[2]).padStart(2, "0");
+    return `${m[1]}-${mm}`;
+  }
+  return x;
 }
 function isMonthKey(v) {
-  return /^\d{4}-\d{1,2}$/.test(s(v));
+  return /^\d{4}-\d{2}$/.test(normMonthKey(v));
 }
-function toMonthKey(v) {
-  const raw = s(v);
-  const m = raw.match(/^(\d{4})-(\d{1,2})$/);
-  if (m) return `${m[1]}-${String(m[2]).padStart(2, "0")}`;
-  const m2 = raw.match(/^(\d{1,2})\/(\d{4})$/);
-  if (m2) return `${m2[2]}-${String(m2[1]).padStart(2, "0")}`;
-  return raw;
-}
-function isLikelyMeetingId(v) {
-  const str = s(v);
-  return /^\d{10,}$/.test(str); // Date.now() 13 dígitos ou similar
-}
-function isDateLike(v) {
-  const str = s(v);
-  return (
-    /^\d{4}-\d{2}-\d{2}/.test(str) ||
-    /^\d{2}\/\d{2}\/\d{4}/.test(str) ||
-    /^\d{2}-\d{2}-\d{4}/.test(str)
-  );
+function quoteSheetTitle(title) {
+  // sempre quote para evitar problema com espaços
+  const t = String(title || "").replace(/'/g, "''");
+  return `'${t}'`;
 }
 
 function looksLikeHeader(row) {
-  const keys = (row || []).map((c) => normKey(c));
+  const r = (row || []).map((c) => normKey(c));
   return (
-    keys.includes("tipo") ||
-    keys.includes("meetingid") ||
-    keys.includes("monthkey") ||
-    keys.includes("sdr") ||
-    keys.includes("oportunidade") ||
-    keys.includes("opportunity")
+    r.includes("tipo") ||
+    r.includes("meetingid") ||
+    r.includes("meetingld") || // L no lugar do I
+    r.includes("monthkey") ||
+    r.includes("sdr")
   );
 }
 
@@ -59,167 +65,156 @@ function pick(obj, keys) {
   return "";
 }
 
-function normSdr(v) {
-  const t = norm(v);
-  if (t.includes("juan")) return "juan";
-  if (t.includes("heloisa")) return "heloisa";
-  return t;
-}
-
 function canonicalizeFromObject(obj, fallbackMonthKey) {
-  // aceita chaves em vários formatos (incluindo normalizadas)
-  const monthKey =
-    toMonthKey(
-      pick(obj, [
-        "monthKey",
-        "MonthKey",
-        "MONTHKEY",
-        "month key",
-        "Month Key",
-        "monthkey",
-        "mes",
-        "mês",
-        "month",
-      ])
-    ) || toMonthKey(fallbackMonthKey);
-
+  // Suporta variações de header (MeetingId vs Meetingld, MonthKey etc)
   return {
-    timestamp: s(pick(obj, ["timestamp", "Timestamp", "time", "Time", "data", "Data"])),
+    timestamp: s(pick(obj, ["timestamp", "Timestamp", "TIME", "Time"])),
     tipo: s(pick(obj, ["tipo", "Tipo", "TIPO"])),
     status: s(pick(obj, ["status", "Status", "STATUS"])),
     meetingId: s(
-      pick(obj, ["meetingId", "meetingID", "MeetingId", "MeetingID", "MEETINGID", "meeting id", "Meeting ID", "meetingid"])
+      pick(obj, [
+        "meetingId",
+        "meetingID",
+        "MeetingId",
+        "MeetingID",
+        "MEETINGID",
+        "Meetingld", // (L)
+        "meetingld",
+        "MeetingID ",
+      ])
     ),
-    sdr: normSdr(pick(obj, ["sdr", "SDR", "Sdr", "responsavel", "responsável"])),
+    sdr: normSdr(pick(obj, ["sdr", "SDR", "Sdr"])),
     ae: s(pick(obj, ["ae", "AE", "Ae"])),
-    oportunidade: s(pick(obj, ["oportunidade", "Oportunidade", "opportunity", "Opportunity", "lead", "Lead", "name", "Name"])),
-    dataReuniao: s(pick(obj, ["dataReuniao", "DataReuniao", "data reuniao", "data reunião", "date", "Date"])),
-    noShowCount: s(pick(obj, ["noShowCount", "NoShowCount", "noshowcount", "noshow", "NoShow", "no-shows", "noshows"])),
-    monthKey,
-    observacao: s(pick(obj, ["observacao", "Observacao", "OBSERVACAO", "obs", "Obs", "observação"])),
+    oportunidade: s(pick(obj, ["oportunidade", "Oportunidade", "opportunity", "Opportunity"])),
+    dataReuniao: s(pick(obj, ["dataReuniao", "DataReuniao", "data", "Data", "date", "Date"])),
+    noShowCount: s(pick(obj, ["noShowCount", "NoShowCount", "noshowcount", "NoShow"])),
+    monthKey: normMonthKey(
+      s(pick(obj, ["monthKey", "MonthKey", "MONTHKEY", "month key", "Month Key"])) || s(fallbackMonthKey)
+    ),
+    observacao: s(pick(obj, ["observacao", "Observacao", "OBSERVACAO", "obs", "Obs"])),
   };
 }
 
+// Quando NÃO tem header: ordem padrão do /api/log
+// [Timestamp, Tipo, Status, MeetingId, SDR, AE, Oportunidade, DataReuniao, NoShowCount, MonthKey, Observacao]
 function canonicalizeFromArray(row, fallbackMonthKey) {
   const cells = (row || []).map((c) => s(c));
-  const n = cells.map((c) => norm(c));
-
-  const knownTypes = new Set(["reuniao", "reunião", "no-show", "noshow", "no show", "penalty", "penalidade"]);
-  let tipoIdx = n.findIndex((c) => knownTypes.has(c));
-  if (tipoIdx === -1) tipoIdx = n.findIndex((c) => c.startsWith("reun"));
-
-  const mkIdx = cells.findIndex((c) => isMonthKey(c) || /^\d{1,2}\/\d{4}$/.test(s(c)));
-  const monthKey = mkIdx >= 0 ? toMonthKey(cells[mkIdx]) : toMonthKey(fallbackMonthKey);
-
-  const sdrIdx = n.findIndex((c) => c.includes("juan") || c.includes("heloisa"));
-
-  // meetingId: pega o maior "digits-only" (>=10)
-  const idCandidates = cells
-    .map((c, i) => ({ c, i }))
-    .filter(({ c }) => isLikelyMeetingId(c))
-    .sort((a, b) => b.c.length - a.c.length);
-  const meetingId = idCandidates.length ? idCandidates[0].c : "";
-
-  // noShowCount: inteiro pequeno 1..20
-  const countCandidates = cells
-    .map((c, i) => ({ c, i, n: Number(c) }))
-    .filter(({ c, n }) => c !== "" && Number.isFinite(n) && n >= 1 && n <= 20);
-  const noShowCount = countCandidates.length ? String(countCandidates[0].n) : "";
-
-  // data reunião
-  const dateIdx = cells.findIndex((c) => isDateLike(c));
-  const dataReuniao = dateIdx >= 0 ? cells[dateIdx] : "";
-
-  // status
-  const stIdx = n.findIndex((c) => c.includes("[deletado]") || c.includes("deletado"));
-  const status = stIdx >= 0 ? cells[stIdx] : "";
-
-  const used = new Set([tipoIdx, mkIdx, sdrIdx, dateIdx, stIdx]);
-  idCandidates.forEach(({ i }) => used.add(i));
-  countCandidates.forEach(({ i }) => used.add(i));
-
-  const remaining = cells
-    .map((c, i) => ({ c, i, nn: n[i] }))
-    .filter(({ c, i, nn }) => c && !used.has(i) && !knownTypes.has(nn) && !isLikelyMeetingId(c) && !isMonthKey(c));
-
-  // oportunidade: normalmente a mais longa
-  remaining.sort((a, b) => b.c.length - a.c.length);
-  const oportunidade = remaining[0]?.c || "";
-
-  // ae: a menor (depois da oportunidade)
-  const remaining2 = remaining.slice(1).sort((a, b) => a.c.length - b.c.length);
-  const ae = remaining2[0]?.c || "";
-  const observacao = remaining2[1]?.c || "";
+  const mkIdx = cells.findIndex((c) => isMonthKey(c));
+  const monthKey = normMonthKey((mkIdx >= 0 ? cells[mkIdx] : cells[9]) || s(fallbackMonthKey));
 
   return {
-    timestamp: "",
-    tipo: tipoIdx >= 0 ? cells[tipoIdx] : "",
-    status,
-    meetingId,
-    sdr: sdrIdx >= 0 ? normSdr(cells[sdrIdx]) : "",
-    ae,
-    oportunidade,
-    dataReuniao,
-    noShowCount,
+    timestamp: cells[0] || "",
+    tipo: cells[1] || "",
+    status: cells[2] || "",
+    meetingId: cells[3] || "",
+    sdr: normSdr(cells[4] || ""),
+    ae: cells[5] || "",
+    oportunidade: cells[6] || "",
+    dataReuniao: cells[7] || "",
+    noShowCount: cells[8] || "",
     monthKey,
-    observacao,
+    observacao: cells[10] || "",
   };
 }
 
-function getEnv() {
-  // fallback: aceita nomes diferentes (caso /api/log esteja usando outro padrão)
-  const spreadsheetId =
-    process.env.GOOGLE_SHEET_ID ||
-    process.env.SHEET_ID ||
-    process.env.SPREADSHEET_ID ||
-    process.env.GSHEET_ID;
-
-  const clientEmail =
-    process.env.GOOGLE_CLIENT_EMAIL ||
-    process.env.GSERVICE_CLIENT_EMAIL ||
-    process.env.SHEET_CLIENT_EMAIL;
-
-  let privateKey =
-    process.env.GOOGLE_PRIVATE_KEY ||
-    process.env.GSERVICE_PRIVATE_KEY ||
-    process.env.SHEET_PRIVATE_KEY;
-
-  const tab =
-    process.env.GOOGLE_SHEET_TAB ||
-    process.env.SHEET_TAB ||
-    process.env.GOOGLE_TAB ||
-    process.env.SHEET_NAME;
-
-  return { spreadsheetId, clientEmail, privateKey, tab };
+async function readTabValues(sheets, spreadsheetId, tabTitle) {
+  const range = `${quoteSheetTitle(tabTitle)}!A:Z`;
+  const resp = await sheets.spreadsheets.values.get({ spreadsheetId, range });
+  const values = resp?.data?.values || [];
+  return values;
 }
 
-// =====================
-// Handler
-// =====================
+async function findBestTab(sheets, spreadsheetId, preferredTab) {
+  // 1) tenta aba preferida primeiro
+  const results = [];
+  const tryTitles = [];
+
+  if (preferredTab) tryTitles.push(preferredTab);
+
+  // 2) lista abas do spreadsheet para fallback
+  const meta = await sheets.spreadsheets.get({
+    spreadsheetId,
+    fields: "sheets(properties(title,hidden))",
+  });
+
+  const allTitles =
+    meta?.data?.sheets
+      ?.map((sh) => sh?.properties)
+      ?.filter((p) => p && !p.hidden)
+      ?.map((p) => String(p.title || ""))
+      ?.filter(Boolean) || [];
+
+  for (const t of allTitles) {
+    if (!tryTitles.includes(t)) tryTitles.push(t);
+  }
+
+  // Limite de varredura para não estourar tempo em planilhas enormes
+  const SCAN_LIMIT = 25;
+
+  for (let i = 0; i < tryTitles.length && i < SCAN_LIMIT; i++) {
+    const title = tryTitles[i];
+    try {
+      const values = await readTabValues(sheets, spreadsheetId, title);
+      if (!Array.isArray(values) || values.length === 0) {
+        results.push({ title, rows: 0, hasHeader: false });
+        continue;
+      }
+      const first = values[0] || [];
+      const hasHeader = looksLikeHeader(first);
+      const rows = hasHeader ? values.length - 1 : values.length;
+
+      results.push({ title, rows, hasHeader });
+
+      // se já tiver linhas, ótimo — mas ainda vamos escolher o "melhor"
+    } catch {
+      results.push({ title, rows: -1, hasHeader: false, error: true });
+    }
+  }
+
+  // escolhe o tab com maior rows (>=1)
+  const candidates = results.filter((r) => r.rows > 0);
+  if (candidates.length === 0) {
+    return { chosen: preferredTab || (tryTitles[0] || ""), scan: results, values: [] };
+  }
+
+  candidates.sort((a, b) => b.rows - a.rows);
+  const chosen = candidates[0].title;
+
+  // lê novamente o escolhido (garante values)
+  const values = await readTabValues(sheets, spreadsheetId, chosen);
+
+  return { chosen, scan: results, values };
+}
+
 export default async function handler(req, res) {
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.setHeader("Cache-Control", "no-store");
+
+  const debug = s(req.query?.debug || "") === "1";
 
   try {
     if (req.method !== "GET") {
       return res.status(405).send(JSON.stringify({ ok: false, error: "Method not allowed" }));
     }
 
-    const { spreadsheetId, clientEmail, privateKey: pkRaw, tab } = getEnv();
+    const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+    const clientEmail = process.env.GOOGLE_CLIENT_EMAIL;
+    let privateKey = process.env.GOOGLE_PRIVATE_KEY;
+    const tab = process.env.GOOGLE_SHEET_TAB;
 
     const envDiag = {
       hasSheetId: !!spreadsheetId,
       hasClientEmail: !!clientEmail,
-      hasPrivateKey: !!pkRaw,
+      hasPrivateKey: !!privateKey,
       hasTab: !!tab,
-      privateKeyLen: pkRaw ? String(pkRaw).length : 0,
+      privateKeyLen: privateKey ? String(privateKey).length : 0,
     };
 
-    if (!spreadsheetId || !clientEmail || !pkRaw || !tab) {
+    if (!spreadsheetId || !clientEmail || !privateKey) {
       return res.status(500).send(JSON.stringify({ ok: false, error: "Missing env vars", env: envDiag }));
     }
 
-    const privateKey = String(pkRaw).replace(/\\n/g, "\n");
+    privateKey = String(privateKey).replace(/\\n/g, "\n");
 
     const auth = new google.auth.JWT({
       email: clientEmail,
@@ -229,28 +224,59 @@ export default async function handler(req, res) {
 
     const sheets = google.sheets({ version: "v4", auth });
 
-    const monthKeyParam = toMonthKey(s(req.query?.monthKey || req.query?.month || ""));
-    const debug = s(req.query?.debug || "") === "1";
-
+    const monthKeyParam = normMonthKey(s(req.query?.monthKey || req.query?.month || ""));
     const limitRaw = s(req.query?.limit || "5000");
     let limit = parseInt(limitRaw, 10);
     if (!Number.isFinite(limit) || limit <= 0) limit = 5000;
     if (limit > 20000) limit = 20000;
 
-    const range = `${tab}!A:Z`;
-
+    // ======== AUTO TAB ========
     let values = [];
+    let chosenTab = tab || "";
+
     try {
-      const resp = await sheets.spreadsheets.values.get({ spreadsheetId, range });
-      values = resp?.data?.values || [];
+      if (tab) {
+        values = await readTabValues(sheets, spreadsheetId, tab);
+      }
+      const first = values?.[0] || [];
+      const hasHeader = looksLikeHeader(first);
+      const rowsCount = hasHeader ? Math.max(0, values.length - 1) : values.length;
+
+      if (!tab || rowsCount === 0) {
+        const found = await findBestTab(sheets, spreadsheetId, tab || "");
+        chosenTab = found.chosen || tab || chosenTab;
+        values = found.values || [];
+        const first2 = values?.[0] || [];
+        const hasHeader2 = looksLikeHeader(first2);
+        const rowsCount2 = hasHeader2 ? Math.max(0, values.length - 1) : values.length;
+
+        // Se mesmo assim vazio, retorna diag completo (quando debug=1)
+        if ((!Array.isArray(values) || values.length <= 1) && debug) {
+          return res.status(200).send(
+            JSON.stringify({
+              ok: true,
+              events: [],
+              hasHeader: hasHeader2,
+              chosenTab,
+              diag: { ...envDiag, monthKeyParam, rows: rowsCount2, returned: 0, scan: found.scan },
+            })
+          );
+        }
+
+        // se não for debug, segue normalmente com values (mesmo que vazio)
+        if (debug) {
+          // anexa scan no final
+          req.__scan = found.scan;
+        }
+      }
     } catch (e) {
       return res
         .status(500)
-        .send(JSON.stringify({ ok: false, error: "sheets_read_failed", detail: String(e?.message || e), env: envDiag }));
+        .send(JSON.stringify({ ok: false, error: "tab_discovery_failed", detail: String(e?.message || e), env: envDiag }));
     }
 
     if (!Array.isArray(values) || values.length === 0) {
-      return res.status(200).send(JSON.stringify({ ok: true, events: [], diag: debug ? { ...envDiag, rows: 0 } : undefined }));
+      return res.status(200).send(JSON.stringify({ ok: true, events: [], hasHeader: false, chosenTab, diag: debug ? { ...envDiag, monthKeyParam, rows: 0 } : undefined }));
     }
 
     const firstRow = values[0] || [];
@@ -267,39 +293,45 @@ export default async function handler(req, res) {
       if (hasHeader) {
         const obj = {};
         for (let i = 0; i < header.length; i++) {
-          const rawKey = s(header[i]);
-          if (!rawKey) continue;
-          const nk = normKey(rawKey);
-          obj[rawKey] = row[i] ?? "";
-          if (nk) obj[nk] = row[i] ?? ""; // também guarda versão normalizada (ex.: "Meeting ID" -> "meetingid")
+          const kRaw = s(header[i]);
+          if (!kRaw) continue;
+          // cria duas chaves: a original e a normalizada (facilita pick)
+          obj[kRaw] = row[i] ?? "";
+          obj[normKey(kRaw)] = row[i] ?? "";
         }
+
+        // pick vai achar tanto "Meetingld" quanto "meetingld" etc.
         ev = canonicalizeFromObject(obj, monthKeyParam);
       } else {
         ev = canonicalizeFromArray(row, monthKeyParam);
       }
 
-      // filtro por mês se o evento tiver monthKey e foi pedido monthKeyParam
-      const evMK = toMonthKey(ev.monthKey);
-      if (monthKeyParam && evMK && evMK !== monthKeyParam) continue;
+      // filtra mês se possível
+      if (monthKeyParam && ev.monthKey && normMonthKey(ev.monthKey) !== monthKeyParam) continue;
 
-      if (!norm(ev.tipo)) continue;
-      if (evMK) ev.monthKey = evMK;
+      if (!s(ev.tipo)) continue;
 
       events.push(ev);
     }
 
     const sliced = events.length > limit ? events.slice(events.length - limit) : events;
 
-    const payload = { ok: true, events: sliced, hasHeader };
+    const payload = {
+      ok: true,
+      events: sliced,
+      hasHeader,
+      chosenTab,
+    };
 
     if (debug) {
       payload.diag = {
         ...envDiag,
+        monthKeyParam,
         rows: rows.length,
         returned: sliced.length,
-        monthKeyParam,
-        sampleFirstRow: firstRow?.slice?.(0, 12) || firstRow,
+        sampleFirstRow: firstRow,
         sampleLastEvent: sliced.length ? sliced[sliced.length - 1] : null,
+        scan: req.__scan || undefined,
       };
     }
 
