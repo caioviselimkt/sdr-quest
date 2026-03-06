@@ -1,101 +1,24 @@
 from pathlib import Path
 
-code = r"""// api/state.js (CommonJS) - versão "SAFE" com diagnóstico em JSON
-// Objetivo: evitar crash silencioso no Vercel e garantir que o front consiga sincronizar.
-
-function safeStr(v) {
-  return String(v ?? "").trim();
-}
-function lower(v) {
-  return safeStr(v).toLowerCase();
-}
-function isMonthKey(v) {
-  return /^\d{4}-\d{2}$/.test(safeStr(v));
-}
-function isLikelyMeetingId(v) {
-  const s = safeStr(v);
-  return /^\d{10,}$/.test(s); // Date.now() 13 dígitos ou similar
-}
-function looksLikeHeader(row) {
-  const r = (row || []).map((c) => lower(c));
-  return r.includes("tipo") || r.includes("meetingid") || r.includes("monthkey") || r.includes("sdr");
-}
-
-function pick(obj, keys) {
-  for (const k of keys) {
-    if (obj && obj[k] !== undefined && obj[k] !== null && safeStr(obj[k]) !== "") return obj[k];
-  }
-  return "";
-}
-
-function canonicalizeFromObject(obj, fallbackMonthKey) {
-  return {
-    timestamp: safeStr(pick(obj, ["timestamp", "Timestamp", "time", "Time"])),
-    tipo: safeStr(pick(obj, ["tipo", "Tipo", "TIPO"])),
-    status: safeStr(pick(obj, ["status", "Status", "STATUS"])),
-    meetingId: safeStr(pick(obj, ["meetingId", "meetingID", "MeetingId", "MeetingID", "MEETINGID"])),
-    sdr: lower(pick(obj, ["sdr", "SDR", "Sdr"])),
-    ae: safeStr(pick(obj, ["ae", "AE", "Ae"])),
-    oportunidade: safeStr(pick(obj, ["oportunidade", "Oportunidade", "opportunity", "Opportunity"])),
-    dataReuniao: safeStr(pick(obj, ["dataReuniao", "DataReuniao", "data", "Data", "date", "Date"])),
-    noShowCount: safeStr(pick(obj, ["noShowCount", "NoShowCount", "noshowcount", "NoShow"])),
-    monthKey: safeStr(pick(obj, ["monthKey", "MonthKey", "MONTHKEY", "month key", "Month Key"])) || safeStr(fallbackMonthKey),
-    observacao: safeStr(pick(obj, ["observacao", "Observacao", "OBSERVACAO", "obs", "Obs"])),
-  };
-}
-
-// Quando NÃO tem header no Sheets, assumimos a ordem padrão do /api/log:
-// [timestamp, tipo, status, meetingId, sdr, ae, oportunidade, dataReuniao, noShowCount, monthKey, observacao]
-function canonicalizeFromArray(row, fallbackMonthKey) {
-  const cells = (row || []).map((c) => safeStr(c));
-
-  // tenta achar monthKey e tipo na linha
-  const mkIdx = cells.findIndex((c) => isMonthKey(c));
-  const tipoIdx = cells.findIndex((c) => {
-    const t = lower(c);
-    return t === "reuniao" || t === "reunião" || t === "no-show" || t === "noshow" || t === "penalty";
-  });
-  const idIdx = cells.findIndex((c) => isLikelyMeetingId(c));
-  const sdrIdx = cells.findIndex((c) => {
-    const s = lower(c);
-    return s === "juan" || s === "heloisa" || s === "heloísa";
-  });
-
-  // fallback por posição padrão
-  const byPos = (i) => (cells[i] !== undefined ? cells[i] : "");
-
-  const monthKey = (mkIdx >= 0 ? cells[mkIdx] : byPos(9)) || safeStr(fallbackMonthKey);
-  const tipo = tipoIdx >= 0 ? cells[tipoIdx] : byPos(1);
-  const meetingId = idIdx >= 0 ? cells[idIdx] : byPos(3);
-  const sdr = sdrIdx >= 0 ? lower(cells[sdrIdx]) : lower(byPos(4));
-
-  return {
-    timestamp: byPos(0),
-    tipo,
-    status: byPos(2),
-    meetingId,
-    sdr,
-    ae: byPos(5),
-    oportunidade: byPos(6),
-    dataReuniao: byPos(7),
-    noShowCount: byPos(8),
-    monthKey,
-    observacao: byPos(10),
-  };
-}
-
+code = r"""// api/state.js (CommonJS) - versão ULTRA COMPAT (sem optional chaining / nullish)
+// Serve para evitar crash por Node antigo (ex.: engines node 12/14).
 module.exports = async function handler(req, res) {
-  // Sempre responder JSON (evita a tela branca do Vercel)
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.setHeader("Cache-Control", "no-store");
 
-  try {
-    if (req.method !== "GET") {
-      return res.status(405).end(JSON.stringify({ ok: false, error: "Method not allowed" }));
-    }
+  function j(status, obj) {
+    res.statusCode = status;
+    res.end(JSON.stringify(obj));
+  }
 
-    // Diagnóstico leve (sem vazar segredo)
-    const envDiag = {
+  function s(v) {
+    return String(v === undefined || v === null ? "" : v).trim();
+  }
+
+  try {
+    if (req.method !== "GET") return j(405, { ok: false, error: "Method not allowed" });
+
+    var envDiag = {
       hasSheetId: !!process.env.GOOGLE_SHEET_ID,
       hasClientEmail: !!process.env.GOOGLE_CLIENT_EMAIL,
       hasPrivateKey: !!process.env.GOOGLE_PRIVATE_KEY,
@@ -103,99 +26,144 @@ module.exports = async function handler(req, res) {
       privateKeyLen: process.env.GOOGLE_PRIVATE_KEY ? String(process.env.GOOGLE_PRIVATE_KEY).length : 0,
     };
 
-    const spreadsheetId = process.env.GOOGLE_SHEET_ID;
-    const clientEmail = process.env.GOOGLE_CLIENT_EMAIL;
-    let privateKey = process.env.GOOGLE_PRIVATE_KEY;
-    const tab = process.env.GOOGLE_SHEET_TAB;
+    var spreadsheetId = process.env.GOOGLE_SHEET_ID;
+    var clientEmail = process.env.GOOGLE_CLIENT_EMAIL;
+    var privateKey = process.env.GOOGLE_PRIVATE_KEY;
+    var tab = process.env.GOOGLE_SHEET_TAB;
 
     if (!spreadsheetId || !clientEmail || !privateKey || !tab) {
-      return res
-        .status(500)
-        .end(JSON.stringify({ ok: false, error: "Missing env vars", env: envDiag }));
+      return j(500, { ok: false, error: "Missing env vars", env: envDiag });
     }
 
     privateKey = String(privateKey).replace(/\\n/g, "\n");
 
-    let google;
+    var googleapis;
     try {
-      ({ google } = require("googleapis"));
+      googleapis = require("googleapis");
     } catch (e) {
-      return res
-        .status(500)
-        .end(JSON.stringify({ ok: false, error: "googleapis_not_available", detail: String(e?.message || e), env: envDiag }));
+      return j(500, { ok: false, error: "googleapis_not_available", detail: String(e && e.message ? e.message : e), env: envDiag });
     }
 
-    const auth = new google.auth.JWT({
+    var google = googleapis.google;
+
+    var auth = new google.auth.JWT({
       email: clientEmail,
       key: privateKey,
       scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
     });
 
-    const sheets = google.sheets({ version: "v4", auth });
+    var sheets = google.sheets({ version: "v4", auth: auth });
 
-    const monthKey = safeStr(req.query.monthKey || req.query.month || "");
-    const limitRaw = safeStr(req.query.limit || "5000");
-    const limit = Math.max(1, Math.min(20000, parseInt(limitRaw, 10) || 5000));
+    var monthKey = s((req.query && (req.query.monthKey || req.query.month)) || "");
+    var limitRaw = s((req.query && req.query.limit) || "5000");
+    var limit = parseInt(limitRaw, 10);
+    if (!isFinite(limit) || limit <= 0) limit = 5000;
+    if (limit > 20000) limit = 20000;
 
-    const range = `${tab}!A:Z`;
-
-    let values = [];
+    var range = tab + "!A:Z";
+    var values = [];
     try {
-      const resp = await sheets.spreadsheets.values.get({ spreadsheetId, range });
-      values = (resp && resp.data && resp.data.values) || [];
+      var resp = await sheets.spreadsheets.values.get({ spreadsheetId: spreadsheetId, range: range });
+      values = (resp && resp.data && resp.data.values) ? resp.data.values : [];
     } catch (e) {
-      return res
-        .status(500)
-        .end(JSON.stringify({ ok: false, error: "sheets_read_failed", detail: String(e?.message || e), env: envDiag }));
+      return j(500, { ok: false, error: "sheets_read_failed", detail: String(e && e.message ? e.message : e), env: envDiag });
     }
 
-    if (!Array.isArray(values) || values.length === 0) {
-      return res.status(200).end(JSON.stringify({ ok: true, events: [] }));
+    if (!values || !values.length) return j(200, { ok: true, events: [] });
+
+    // Detecta se a primeira linha parece header
+    var first = values[0] || [];
+    var lower = function (x) { return s(x).toLowerCase(); };
+    var hasHeader = false;
+    (first || []).forEach(function (c) {
+      var t = lower(c);
+      if (t === "tipo" || t === "meetingid" || t === "monthkey" || t === "sdr") hasHeader = true;
+    });
+
+    var header = hasHeader ? first : [];
+    var rows = hasHeader ? values.slice(1) : values;
+
+    function isMonthKey(v) { return /^\d{4}-\d{2}$/.test(s(v)); }
+
+    // Ordem padrão (sem header): [timestamp, tipo, status, meetingId, sdr, ae, oportunidade, dataReuniao, noShowCount, monthKey, observacao]
+    function fromArray(row) {
+      var cells = (row || []).map(function (c) { return s(c); });
+      var mk = "";
+      for (var i = 0; i < cells.length; i++) {
+        if (isMonthKey(cells[i])) { mk = cells[i]; break; }
+      }
+      return {
+        timestamp: cells[0] || "",
+        tipo: cells[1] || "",
+        status: cells[2] || "",
+        meetingId: cells[3] || "",
+        sdr: (cells[4] || "").toLowerCase(),
+        ae: cells[5] || "",
+        oportunidade: cells[6] || "",
+        dataReuniao: cells[7] || "",
+        noShowCount: cells[8] || "",
+        monthKey: mk || cells[9] || monthKey || "",
+        observacao: cells[10] || "",
+      };
     }
 
-    const firstRow = values[0] || [];
-    const hasHeader = looksLikeHeader(firstRow);
-
-    let header = hasHeader ? firstRow : [];
-    let rows = hasHeader ? values.slice(1) : values;
-
-    const events = [];
-
-    for (const row of rows) {
-      if (!row || row.length === 0) continue;
-
-      let ev;
-      if (hasHeader) {
-        const obj = {};
-        for (let i = 0; i < header.length; i++) {
-          const k = safeStr(header[i]);
-          if (!k) continue;
-          obj[k] = row[i] ?? "";
+    function fromObject(obj) {
+      var o = obj || {};
+      function pick(keys) {
+        for (var i = 0; i < keys.length; i++) {
+          var k = keys[i];
+          if (o[k] !== undefined && o[k] !== null && s(o[k]) !== "") return o[k];
         }
-        ev = canonicalizeFromObject(obj, monthKey);
+        return "";
+      }
+      return {
+        timestamp: s(pick(["timestamp", "Timestamp", "time", "Time"])),
+        tipo: s(pick(["tipo", "Tipo", "TIPO"])),
+        status: s(pick(["status", "Status", "STATUS"])),
+        meetingId: s(pick(["meetingId", "meetingID", "MeetingId", "MeetingID", "MEETINGID"])),
+        sdr: s(pick(["sdr", "SDR", "Sdr"])).toLowerCase(),
+        ae: s(pick(["ae", "AE", "Ae"])),
+        oportunidade: s(pick(["oportunidade", "Oportunidade", "opportunity", "Opportunity"])),
+        dataReuniao: s(pick(["dataReuniao", "DataReuniao", "data", "Data", "date", "Date"])),
+        noShowCount: s(pick(["noShowCount", "NoShowCount", "noshowcount", "NoShow"])),
+        monthKey: s(pick(["monthKey", "MonthKey", "MONTHKEY", "month key", "Month Key"])) || monthKey || "",
+        observacao: s(pick(["observacao", "Observacao", "OBSERVACAO", "obs", "Obs"])),
+      };
+    }
+
+    var events = [];
+
+    for (var r = 0; r < rows.length; r++) {
+      var row = rows[r];
+      if (!row || !row.length) continue;
+
+      var ev;
+      if (hasHeader) {
+        var obj = {};
+        for (var c = 0; c < header.length; c++) {
+          var k = s(header[c]);
+          if (!k) continue;
+          obj[k] = (row[c] === undefined ? "" : row[c]);
+        }
+        ev = fromObject(obj);
       } else {
-        ev = canonicalizeFromArray(row, monthKey);
+        ev = fromArray(row);
       }
 
-      // filtra mês se aplicável
       if (monthKey && ev.monthKey && ev.monthKey !== monthKey) continue;
-
-      if (!safeStr(ev.tipo)) continue; // precisa ter tipo
+      if (!s(ev.tipo)) continue;
 
       events.push(ev);
     }
 
-    const sliced = events.length > limit ? events.slice(events.length - limit) : events;
+    if (events.length > limit) events = events.slice(events.length - limit);
 
-    return res.status(200).end(JSON.stringify({ ok: true, events: sliced, hasHeader }));
+    return j(200, { ok: true, events: events, hasHeader: hasHeader });
   } catch (e) {
-    // Último fallback - nunca crashar sem resposta
-    return res
-      .status(500)
-      .end(JSON.stringify({ ok: false, error: "unhandled_exception", detail: String(e?.message || e) }));
+    return j(500, { ok: false, error: "unhandled_exception", detail: String(e && e.message ? e.message : e) });
   }
 };
 """
-out = Path("/mnt/data/api_state_SAFE.js")
+out = Path("/mnt/data/api_state_ULTRA_COMPAT.js")
 out.write_text(code, encoding="utf-8")
-str(out)
+out
